@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: custodial-scheduler
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: npm install && npm run build && npm run db:init
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DB_PATH
+        value: /opt/render/project/data/custodial.db
+    disk:
+      name: custodial-data
+      mountPath: /opt/render/project/data
+      sizeGB: 1
