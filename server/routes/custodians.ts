@@ -1,16 +1,18 @@
 import { Router } from "express";
-import db from "../db/index.js";
+import db from "../db/index";
+import { custodianCreateRequestSchema, custodianUpdateRequestSchema } from "../../shared/schemas";
+import type { Custodian } from "../../shared/types";
 
 const router = Router();
 
-router.get("/", async (req, res) => {
-  res.json(await db.all(`SELECT c.*, s.name as shift_name, s.start_time, s.productive_min
+router.get("/", async (_req, res) => {
+  res.json(await db.all<Custodian>(`SELECT c.*, s.name as shift_name, s.start_time, s.productive_min
     FROM custodians c LEFT JOIN shift_templates s ON s.id = c.shift_template_id
     WHERE c.active = 1 ORDER BY s.start_time, c.name`));
 });
 
 router.get("/:id", async (req, res) => {
-  const c = await db.get(`SELECT c.*, s.name as shift_name, s.start_time, s.productive_min
+  const c = await db.get<Custodian>(`SELECT c.*, s.name as shift_name, s.start_time, s.productive_min
     FROM custodians c LEFT JOIN shift_templates s ON s.id = c.shift_template_id
     WHERE c.id = ?`, [req.params.id]);
   if (!c) return res.status(404).json({ error: "Not found" });
@@ -18,19 +20,23 @@ router.get("/:id", async (req, res) => {
 });
 
 router.post("/", async (req, res) => {
-  const { name, shift_template_id, notes } = req.body;
+  const parsed = custodianCreateRequestSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { name, shift_template_id, notes } = parsed.data;
   const r = await db.run(
     "INSERT INTO custodians (name, shift_template_id, notes) VALUES (?, ?, ?)",
-    [name, shift_template_id, notes]);
-  res.json({ id: r.lastInsertRowid });
+    [name, shift_template_id, notes ?? null]);
+  res.json({ id: Number(r.lastInsertRowid) });
 });
 
 router.patch("/:id", async (req, res) => {
-  const { name, shift_template_id, active, notes } = req.body;
+  const parsed = custodianUpdateRequestSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { name, shift_template_id, active, notes } = parsed.data;
   await db.run(`UPDATE custodians SET name = COALESCE(?, name),
     shift_template_id = COALESCE(?, shift_template_id),
     active = COALESCE(?, active), notes = COALESCE(?, notes) WHERE id = ?`,
-    [name, shift_template_id, active, notes, req.params.id]);
+    [name ?? null, shift_template_id ?? null, active ?? null, notes ?? null, req.params.id]);
   res.json({ ok: true });
 });
 

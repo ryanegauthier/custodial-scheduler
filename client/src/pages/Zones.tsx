@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
+import { api } from "../api";
+import type { ZoneWithBuildings } from "@shared/types";
 
 export default function Zones() {
-  const [zones, setZones] = useState([]);
+  const [zones, setZones] = useState<ZoneWithBuildings[]>([]);
 
   useEffect(() => {
-    fetch("/api/zones").then(r => r.json()).then(setZones);
+    api.getZones().then(setZones);
   }, []);
 
   const totalHrs = zones.reduce((s, z) => s + (z.total_hours || 0), 0);

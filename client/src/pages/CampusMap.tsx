@@ -1,17 +1,20 @@
 import { useState, useEffect, useRef } from "react";
+import { api } from "../api";
+import type { BuildingMapPoint, ZoneWithBuildings } from "@shared/types";
+import type { AISuggestZonesResult } from "@shared/schemas";
 
 export default function CampusMap() {
-  const [buildings, setBuildings] = useState([]);
-  const [zones, setZones] = useState([]);
-  const [selected, setSelected] = useState(null);
-  const [activeZone, setActiveZone] = useState(null);
-  const [aiSuggestion, setAiSuggestion] = useState(null);
+  const [buildings, setBuildings] = useState<BuildingMapPoint[]>([]);
+  const [zones, setZones] = useState<ZoneWithBuildings[]>([]);
+  const [selected, setSelected] = useState<BuildingMapPoint | null>(null);
+  const [activeZone, setActiveZone] = useState<number | null>(null);
+  const [aiSuggestion, setAiSuggestion] = useState<AISuggestZonesResult | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
-  const svgRef = useRef(null);
+  const svgRef = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
-    fetch("/api/buildings/map").then(r => r.json()).then(setBuildings);
-    fetch("/api/zones").then(r => r.json()).then(setZones);
+    api.getBuildingsMap().then(setBuildings);
+    api.getZones().then(setZones);
   }, []);
 
   // Map bounds derived from actual coordinates
@@ -19,14 +22,14 @@ export default function CampusMap() {
   const minLng = -117.4235, maxLng = -117.4105;
   const W = 640, H = 420, pad = 36;
 
-  function toXY(lat, lng) {
+  function toXY(lat: number, lng: number): [number, number] {
     const x = pad + (lng - minLng) / (maxLng - minLng) * (W - pad * 2);
     const y = pad + (maxLat - lat) / (maxLat - minLat) * (H - pad * 2);
     return [x, y];
   }
 
   const maxHrs = Math.max(...buildings.map(b => b.daily_hours_l2 || 0), 1);
-  const r = (hrs) => Math.max(6, Math.sqrt(hrs / maxHrs) * 20);
+  const r = (hrs: number) => Math.max(6, Math.sqrt(hrs / maxHrs) * 20);
 
   const zoneMap = Object.fromEntries(zones.map(z => [z.id, z]));
 
@@ -34,12 +37,7 @@ export default function CampusMap() {
     setAiLoading(true);
     setAiSuggestion(null);
     try {
-      const res = await fetch("/api/ai/suggest-zones", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const data = await res.json();
+      const { data } = await api.aiSuggestZones();
       setAiSuggestion(data);
     } finally {
       setAiLoading(false);
@@ -88,7 +86,7 @@ export default function CampusMap() {
                 <div key={i} style={{ padding: "4px 0", borderBottom: "1px solid var(--border)", display: "flex", gap: 8 }}>
                   <span style={{ flex: 1, fontWeight: 500 }}>{bldg?.name}</span>
                   {zone && (
-                    <span style={{ color: zone.color }}>→ {zone.name}</span>
+                    <span style={{ color: zone.color ?? undefined }}>→ {zone.name}</span>
                   )}
                   <span style={{ color: "var(--text-muted)" }}>{a.reason}</span>
                 </div>
@@ -131,10 +129,10 @@ export default function CampusMap() {
           {/* Buildings */}
           {buildings.map(b => {
             const [x, y] = toXY(b.lat, b.lng);
-            const zone = zoneMap[b.zone_id];
+            const zone = zoneMap[b.zone_id ?? -1];
             const color = zone?.color || "#888";
             const radius = r(b.daily_hours_l2 || 0);
-            const dimmed = activeZone && b.zone_id !== activeZone;
+            const dimmed = activeZone !== null && b.zone_id !== activeZone;
             const isSelected = selected?.id === b.id;
 
             return (
@@ -178,13 +176,13 @@ export default function CampusMap() {
           <span
             style={{
               width: 12, height: 12, borderRadius: "50%",
-              background: zoneMap[selected.zone_id]?.color || "#888",
+              background: zoneMap[selected.zone_id ?? -1]?.color || "#888",
               flexShrink: 0,
             }}
           />
           <strong style={{ flex: 1 }}>{selected.name}</strong>
-          <span style={{ color: zoneMap[selected.zone_id]?.color, fontSize: 12 }}>
-            {zoneMap[selected.zone_id]?.name}
+          <span style={{ color: zoneMap[selected.zone_id ?? -1]?.color ?? undefined, fontSize: 12 }}>
+            {zoneMap[selected.zone_id ?? -1]?.name}
           </span>
           <span className="text-mono" style={{ color: "var(--gold)", fontSize: 13 }}>
             {(selected.daily_hours_l2 || 0).toFixed(2)} hrs/day
@@ -216,9 +214,9 @@ export default function CampusMap() {
               color: "var(--text)",
             }}
           >
-            <span style={{ width: 9, height: 9, borderRadius: "50%", background: z.color, display: "inline-block" }} />
+            <span style={{ width: 9, height: 9, borderRadius: "50%", background: z.color ?? undefined, display: "inline-block" }} />
             {z.name}
-            <span style={{ fontFamily: "var(--font-mono)", color: z.color }}>
+            <span style={{ fontFamily: "var(--font-mono)", color: z.color ?? undefined }}>
               {z.total_hours.toFixed(1)}h
             </span>
             <span style={{ color: "var(--text-muted)" }}>

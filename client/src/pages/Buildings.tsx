@@ -1,17 +1,17 @@
 import { useState, useEffect } from "react";
+import { api } from "../api";
+import type { Building } from "@shared/types";
 
 export default function Buildings() {
-  const [buildings, setBuildings] = useState([]);
+  const [buildings, setBuildings] = useState<Building[]>([]);
   const [search, setSearch] = useState("");
   const [filterCat, setFilterCat] = useState("all");
 
   useEffect(() => {
-    fetch("/api/buildings")
-      .then(r => r.json())
-      .then(setBuildings);
+    api.getBuildings().then(setBuildings);
   }, []);
 
-  const categories = [...new Set(buildings.map(b => b.category).filter(Boolean))].sort();
+  const categories = [...new Set(buildings.map(b => b.category).filter((c): c is string => Boolean(c)))].sort();
 
   const filtered = buildings.filter(b => {
     const matchSearch = b.name.toLowerCase().includes(search.toLowerCase());
@@ -69,7 +69,7 @@ export default function Buildings() {
                     {b.zone_color && (
                       <span style={{ width: 8, height: 8, borderRadius: 2, background: b.zone_color, display: "inline-block" }} />
                     )}
-                    {b.zone_name || <span className="text-muted">—</span>}
+                    {b.zone_name || <span className="text-muted">-</span>}
                   </span>
                 </td>
                 <td className="text-mono">{b.total_sqft?.toLocaleString()}</td>

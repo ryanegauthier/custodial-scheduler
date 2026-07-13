@@ -380,11 +380,11 @@ CREATE TABLE IF NOT EXISTS task_types (
 );
 
 INSERT INTO task_types (id, name, priority, is_disruptive, description) VALUES
-(1, 'Floors / Vacuum',    1, TRUE,  'Sweeping, mopping, vacuuming — most disruptive, do first'),
+(1, 'Floors / Vacuum',    1, TRUE,  'Sweeping, mopping, vacuuming - most disruptive, do first'),
 (2, 'Restrooms',          2, FALSE, 'Full restroom service including restock'),
 (3, 'Trash (Classrooms)', 3, FALSE, 'Empty and reline classroom waste bins'),
 (4, 'Trash (Common)',     4, FALSE, 'Empty common area, hallway, lounge bins'),
-(5, 'Spot Clean / Touch', 5, FALSE, 'Whiteboards, doors, surfaces — done last as occupants arrive');
+(5, 'Spot Clean / Touch', 5, FALSE, 'Whiteboards, doors, surfaces - done last as occupants arrive');
 
 -- Building task assignments (generated per day)
 CREATE TABLE IF NOT EXISTS building_tasks (

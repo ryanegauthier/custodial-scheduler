@@ -1,11 +1,13 @@
 import { useState } from "react";
-import ScheduleBoard from "./pages/ScheduleBoard.jsx";
-import Buildings from "./pages/Buildings.jsx";
-import Custodians from "./pages/Custodians.jsx";
-import Zones from "./pages/Zones.jsx";
-import CampusMap from "./pages/CampusMap.jsx";
+import ScheduleBoard from "./pages/ScheduleBoard.tsx";
+import Buildings from "./pages/Buildings.tsx";
+import Custodians from "./pages/Custodians.tsx";
+import Zones from "./pages/Zones.tsx";
+import CampusMap from "./pages/CampusMap.tsx";
 
-const NAV = [
+type PageId = "schedule" | "custodians" | "buildings" | "zones" | "map";
+
+const NAV: { id: PageId; label: string; icon: string }[] = [
   { id: "schedule",   label: "Daily Schedule",  icon: "📋" },
   { id: "custodians", label: "Custodians",       icon: "👥" },
   { id: "buildings",  label: "Buildings",        icon: "🏛️" },
@@ -14,7 +16,7 @@ const NAV = [
 ];
 
 export default function App() {
-  const [page, setPage] = useState("schedule");
+  const [page, setPage] = useState<PageId>("schedule");
 
   return (
     <div className="app-layout">

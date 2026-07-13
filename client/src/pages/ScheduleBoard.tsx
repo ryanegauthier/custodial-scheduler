@@ -1,26 +1,28 @@
 import { useState, useEffect } from "react";
+import { api } from "../api";
+import type { DailySchedule } from "@shared/types";
+import type { AIRebalanceResult } from "@shared/schemas";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-const TASK_COLORS = { 1: "priority-1", 2: "priority-2", 3: "priority-3", 4: "priority-4", 5: "priority-5" };
-const TASK_LABELS = { 1: "Floors/Vac", 2: "Restrooms", 3: "Trash (Class)", 4: "Trash (Common)", 5: "Spot Clean" };
+const TASK_COLORS: Record<number, string> = { 1: "priority-1", 2: "priority-2", 3: "priority-3", 4: "priority-4", 5: "priority-5" };
+const TASK_LABELS: Record<number, string> = { 1: "Floors/Vac", 2: "Restrooms", 3: "Trash (Class)", 4: "Trash (Common)", 5: "Spot Clean" };
 
 export default function ScheduleBoard() {
   const [date, setDate] = useState(today());
-  const [schedule, setSchedule] = useState(null);
+  const [schedule, setSchedule] = useState<DailySchedule | null>(null);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiSummary, setAiSummary] = useState(null);
-  const [error, setError] = useState(null);
+  const [aiSummary, setAiSummary] = useState<AIRebalanceResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  async function fetchSchedule(d) {
+  async function fetchSchedule(d: string) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/schedules?date=${d}`);
-      setSchedule(await res.json());
-    } catch (e) {
+      setSchedule(await api.getSchedule(d));
+    } catch {
       setError("Could not load schedule.");
     } finally {
       setLoading(false);
@@ -30,13 +32,8 @@ export default function ScheduleBoard() {
   async function generateSchedule() {
     setGenerating(true);
     try {
-      const res = await fetch("/api/schedules/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date }),
-      });
-      const data = await res.json();
-      if (res.status === 409) {
+      const { status } = await api.generateSchedule(date);
+      if (status === 409) {
         setError("Schedule already exists for this date.");
       } else {
         await fetchSchedule(date);
@@ -50,12 +47,7 @@ export default function ScheduleBoard() {
     setAiLoading(true);
     setAiSummary(null);
     try {
-      const res = await fetch("/api/ai/rebalance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date }),
-      });
-      const data = await res.json();
+      const { data } = await api.aiRebalance(date);
       setAiSummary(data);
     } finally {
       setAiLoading(false);
@@ -64,7 +56,7 @@ export default function ScheduleBoard() {
 
   useEffect(() => { fetchSchedule(date); }, [date]);
 
-  const hasSchedule = schedule && schedule.tasks && schedule.tasks.length > 0;
+  const hasSchedule = Boolean(schedule && schedule.tasks && schedule.tasks.length > 0);
   const disruptions = schedule?.disruptions || [];
   const unassigned  = schedule?.unassigned_tasks || [];
 
@@ -99,7 +91,7 @@ export default function ScheduleBoard() {
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {disruptions.map(d => (
             <div key={d.id} className="alert alert-warn">
-              ⚠️ <strong>{d.custodian_name || d.building_name}</strong> — {d.type}
+              ⚠️ <strong>{d.custodian_name || d.building_name}</strong> - {d.type}
               {d.description && `: ${d.description}`}
             </div>
           ))}
@@ -128,7 +120,7 @@ export default function ScheduleBoard() {
               </div>
               {aiSummary.reassignments.map((r, i) => (
                 <div key={i} style={{ fontSize: 12, padding: "4px 0", borderBottom: "1px solid var(--border)" }}>
-                  Task #{r.task_id} → Custodian #{r.new_custodian_id} — {r.reason}
+                  Task #{r.task_id} → Custodian #{r.new_custodian_id} - {r.reason}
                 </div>
               ))}
             </div>
@@ -150,7 +142,7 @@ export default function ScheduleBoard() {
                 <div key={z.zone.id}>
                   <div className="flex justify-between items-center" style={{ marginBottom: 4 }}>
                     <span style={{ fontSize: 13 }}>
-                      <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: z.zone.color, marginRight: 8, verticalAlign: "middle" }} />
+                      <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: z.zone.color ?? undefined, marginRight: 8, verticalAlign: "middle" }} />
                       {z.zone.name}
                     </span>
                     <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: pct < 80 ? "var(--yellow)" : "var(--text-muted)" }}>
@@ -177,7 +169,7 @@ export default function ScheduleBoard() {
         </div>
       )}
 
-      {hasSchedule && (
+      {hasSchedule && schedule && (
         <>
           <div className="schedule-grid">
             {schedule.custodians.map(c => (
@@ -196,7 +188,7 @@ export default function ScheduleBoard() {
                     <div style={{ color: "var(--text-muted)", fontSize: 12, padding: "8px 4px" }}>No tasks assigned</div>
                   )}
                   {c.tasks.map(t => (
-                    <div key={t.id} className={`task-row ${TASK_COLORS[t.priority] || ""}`}>
+                    <div key={t.id} className={`task-row ${TASK_COLORS[t.priority ?? -1] || ""}`}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div className="task-building">{t.building_name}</div>
                         <div className="task-type">{TASK_LABELS[t.task_type_id] || t.task_name}</div>
@@ -228,7 +220,7 @@ export default function ScheduleBoard() {
                   {unassigned.map(t => (
                     <tr key={t.id}>
                       <td>{t.building_name}</td>
-                      <td><span style={{ color: t.zone_color, fontWeight: 500 }}>{t.zone_name}</span></td>
+                      <td><span style={{ color: t.zone_color ?? undefined, fontWeight: 500 }}>{t.zone_name}</span></td>
                       <td>{TASK_LABELS[t.task_type_id] || t.task_name}</td>
                       <td className="text-mono">{t.estimated_hours?.toFixed(2)}</td>
                     </tr>

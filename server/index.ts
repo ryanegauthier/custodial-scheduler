@@ -4,12 +4,12 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import buildingsRouter    from "./routes/buildings.js";
-import custodiansRouter   from "./routes/custodians.js";
-import schedulesRouter    from "./routes/schedules.js";
-import zonesRouter        from "./routes/zones.js";
-import disruptionsRouter  from "./routes/disruptions.js";
-import aiRouter           from "./routes/ai.js";
+import buildingsRouter    from "./routes/buildings";
+import custodiansRouter   from "./routes/custodians";
+import schedulesRouter    from "./routes/schedules";
+import zonesRouter        from "./routes/zones";
+import disruptionsRouter  from "./routes/disruptions";
+import aiRouter           from "./routes/ai";
 
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

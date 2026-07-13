@@ -1,4 +1,4 @@
-# Custodial Scheduler — Whitworth University
+# Custodial Scheduler - Whitworth University
 
 Operational scheduling tool for the Whitworth custodial team. Built on Express + SQLite + React.
 
@@ -23,27 +23,33 @@ Server runs on :3001, client on :5173 (proxied to server).
 ## Structure
 
 ```
+shared/
+  types.ts           # Trusted internal SQL row shapes (Building, Zone, etc.)
+  schemas.ts         # zod schemas for request bodies + Claude JSON output
 server/
-  index.js           # Express entry
-  db/index.js        # SQLite connection
+  index.ts           # Express entry
+  db/index.ts        # SQLite connection
   routes/
-    buildings.js     # Building CRUD + space breakdown
-    custodians.js    # Custodian management
-    schedules.js     # Daily schedule generation + assignment
-    zones.js         # Zone management
-    disruptions.js   # Callouts, events, special projects
-    ai.js            # Claude Haiku rebalancing + impact analysis
+    buildings.ts     # Building CRUD + space breakdown
+    custodians.ts    # Custodian management
+    schedules.ts     # Daily schedule generation + assignment
+    zones.ts         # Zone management
+    disruptions.ts   # Callouts, events, special projects
+    ai.ts            # Claude Haiku rebalancing + impact analysis
 client/
   src/
+    api.ts             # Typed fetch wrappers over shared/types + shared/schemas
     pages/
-      ScheduleBoard.jsx  # Main daily view
-      Buildings.jsx      # Building list + hours
-      Custodians.jsx     # Staff roster by shift
-      Zones.jsx          # Zone breakdown
+      ScheduleBoard.tsx  # Main daily view
+      Buildings.tsx      # Building list + hours
+      Custodians.tsx     # Staff roster by shift
+      Zones.tsx          # Zone breakdown
 seeds/
   001_appa_standards.sql   # APPA room types + service levels
   002_whitworth_data.sql   # 41 WU buildings, 248 space rows, real sqft
 ```
+
+Run `npm run typecheck` to type-check both the client and server projects.
 
 ## Key numbers (from WU Building Data spreadsheet)
 

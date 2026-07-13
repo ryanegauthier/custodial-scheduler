@@ -1,4 +1,7 @@
 import { useState, useEffect } from "react";
+import { api } from "../api";
+import type { Custodian } from "@shared/types";
+import type { CustodianCreateRequest } from "@shared/schemas";
 
 const SHIFTS = [
   { id: 1, label: "4am Shift" },
@@ -7,31 +10,26 @@ const SHIFTS = [
 ];
 
 export default function Custodians() {
-  const [custodians, setCustodians] = useState([]);
+  const [custodians, setCustodians] = useState<Custodian[]>([]);
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ name: "", shift_template_id: 1 });
+  const [form, setForm] = useState<CustodianCreateRequest>({ name: "", shift_template_id: 1 });
 
   async function load() {
-    const res = await fetch("/api/custodians");
-    setCustodians(await res.json());
+    setCustodians(await api.getCustodians());
   }
 
   useEffect(() => { load(); }, []);
 
   async function addCustodian() {
-    await fetch("/api/custodians", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
+    await api.addCustodian(form);
     setForm({ name: "", shift_template_id: 1 });
     setAdding(false);
     load();
   }
 
-  async function deactivate(id) {
+  async function deactivate(id: number) {
     if (!confirm("Remove this custodian?")) return;
-    await fetch(`/api/custodians/${id}`, { method: "DELETE" });
+    await api.deactivateCustodian(id);
     load();
   }
 
