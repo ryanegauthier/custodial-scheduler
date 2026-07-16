@@ -71,9 +71,62 @@ Found while typing existing files for the migration above, not new work:
 
 ### Style
 
-- Removed em dashes per the CLAUDE.md convention from `README.md`,
-  `client/index.html` (title), `client/src/pages/Buildings.tsx`,
-  `client/src/pages/ScheduleBoard.tsx`, `seeds/002_whitworth_data.sql`, and
-  comments authored during this migration in `server/db/index.ts` /
-  `shared/types.ts`. Note: `data/custodial.db` is generated from seeds and
+- Note: `data/custodial.db` is generated from seeds and
   gitignored - re-run `npm run db:init` to pick up the seed text change.
+
+---
+
+## 2026-07-13 (2)
+
+### Reskinned client to Whitworth brand colors, top nav, light/dark toggle
+
+- Pulled real values from whitworth.edu's own CSS
+  (`media.whitworth.edu/css/mq-base.css`) rather than guessing: primary
+  crimson `#9f0811` (392 occurrences, clearly dominant), darker crimson
+  `#6e060c`/`#3e0307`, secondary teal `#007c89`/`#004e56`, small gold accent
+  `#f7d04e`. Their real nav is a horizontal top bar (`primary-nav`), not a
+  sidebar.
+- `client/src/index.css`: kept existing CSS variable names (`--navy`,
+  `--navy-mid`, `--gold`, etc.) and only changed their values, to avoid
+  touching every page component that references them as inline
+  `var(--gold)`/`var(--navy)` strings (`Zones.tsx`, `ScheduleBoard.tsx`,
+  `Custodians.tsx`, `CampusMap.tsx`). Brand colors (`--navy-mid` = crimson,
+  `--navy-light` = crimson-dark, `--gold`) are constant across themes;
+  `--navy`/`--surface*`/`--border`/`--text*` are the themed values, overridden
+  under a new `:root[data-theme="light"]` block.
+- Added `--teal`/`--teal-dark` (defined, not yet used - future secondary
+  accent), `--on-accent` (fixed dark text color for use on top of `--gold`
+  fills, decoupled from `--navy` since `--navy` itself is now themed and
+  would otherwise go light-on-light in light mode), and `--map-bg` (fixed
+  dark, theme-invariant - the campus map SVG's grid lines and labels are
+  hardcoded white/light and assume a dark backdrop regardless of app theme).
+- Fixed a latent bug this surfaced: `.btn-primary` used
+  `color: var(--navy)` for its dark text-on-gold-button contrast. Once
+  `--navy` became themed (light in light mode), that would have put light
+  text on a gold button. Decoupled to the new `--on-accent` constant.
+- `client/src/index.css` / `client/src/App.tsx`: replaced the left
+  `.sidebar` layout with a horizontal `.topbar` (crimson fill, gold
+  bottom stripe, wordmark left, nav items inline, theme toggle right),
+  matching whitworth.edu's real nav structure at a scale appropriate for a
+  5-page internal tool (no mega-menu).
+- Theme toggle: `App.tsx` holds `theme` state, initialized from
+  `localStorage`, persisted on change, applied via
+  `document.documentElement.setAttribute("data-theme", ...)`.
+  `client/index.html` has a small inline script that reads `localStorage`
+  and sets the attribute before first paint, to avoid a flash of the wrong
+  theme on load.
+- `client/src/pages/CampusMap.tsx`: one-line change, map SVG background from
+  `var(--navy)` to `var(--map-bg)` (see above - required for correctness
+  once `--navy` became theme-dependent).
+- Verified visually, not just by typecheck: temporarily installed Playwright
+  (flagged and confirmed with the user first per this file's dependency
+  rule), screenshotted both themes across the Schedule, Custodians, and
+  Campus Map pages, checked `console --errors` was empty, then uninstalled
+  Playwright since the app itself doesn't need it. Caught and fixed two
+  issues this way that typecheck couldn't have caught: `--gold` text
+  (shift labels, hour figures) was low-contrast on the light theme's
+  white/cream surfaces, so light mode gets its own deeper `--gold: #a6790a`
+  override; and `.badge-gold`'s background was a hardcoded
+  `rgba(200,168,75,...)` left over from the old gold hex, now updated to
+  match (`rgba(247,208,78,...)`) - this class turned out to be unused in
+  any page, so it was a latent inconsistency rather than a visible bug.

@@ -3,3 +3,4 @@ data
 client/dist
 .env
 CLAUDE.md
+.vscode

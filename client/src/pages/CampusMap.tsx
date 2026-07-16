@@ -102,7 +102,7 @@ export default function CampusMap() {
           ref={svgRef}
           viewBox={`0 0 ${W} ${H}`}
           width="100%"
-          style={{ display: "block", background: "var(--navy)" }}
+          style={{ display: "block", background: "var(--map-bg)" }}
         >
           {/* Grid lines */}
           {[0, 1, 2, 3, 4].map(i => (

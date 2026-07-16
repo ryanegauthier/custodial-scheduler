@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import ScheduleBoard from "./pages/ScheduleBoard.tsx";
 import Buildings from "./pages/Buildings.tsx";
 import Custodians from "./pages/Custodians.tsx";
@@ -6,6 +6,7 @@ import Zones from "./pages/Zones.tsx";
 import CampusMap from "./pages/CampusMap.tsx";
 
 type PageId = "schedule" | "custodians" | "buildings" | "zones" | "map";
+type Theme = "dark" | "light";
 
 const NAV: { id: PageId; label: string; icon: string }[] = [
   { id: "schedule",   label: "Daily Schedule",  icon: "📋" },
@@ -15,17 +16,27 @@ const NAV: { id: PageId; label: string; icon: string }[] = [
   { id: "map",        label: "Campus Map",       icon: "📍" },
 ];
 
+function getInitialTheme(): Theme {
+  return localStorage.getItem("theme") === "light" ? "light" : "dark";
+}
+
 export default function App() {
   const [page, setPage] = useState<PageId>("schedule");
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
 
   return (
     <div className="app-layout">
-      <nav className="sidebar">
-        <div className="sidebar-logo">
+      <header className="topbar">
+        <div className="topbar-logo">
           <div className="wordmark">Custodial</div>
           <div className="sub">Whitworth University</div>
         </div>
-        <div className="sidebar-nav">
+        <nav className="topbar-nav">
           {NAV.map(n => (
             <button
               key={n.id}
@@ -36,8 +47,14 @@ export default function App() {
               <span>{n.label}</span>
             </button>
           ))}
-        </div>
-      </nav>
+        </nav>
+        <button
+          className="theme-toggle"
+          onClick={() => setTheme(t => (t === "dark" ? "light" : "dark"))}
+        >
+          {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
+        </button>
+      </header>
 
       <main className="main-content">
         {page === "schedule"   && <ScheduleBoard />}
