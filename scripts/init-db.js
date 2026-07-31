@@ -6,13 +6,47 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "../data/custodial.db");
 const SEED_DIR = path.join(__dirname, "../seeds");
+const RESET = process.argv.includes("--reset");
+
+// A caller that asks for --reset must actually get a wipe - silently
+// keeping the old file (with its old data) would be worse than crashing.
+// Retries only smooth over transient OS-level lock timing (seen on
+// Windows right after a client closes), not a reason to give up on it.
+async function unlinkRequired(filePath, attempts = 10, delayMs = 150) {
+  if (!fs.existsSync(filePath)) return;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      fs.unlinkSync(filePath);
+      return;
+    } catch (e) {
+      if (i === attempts - 1) throw e;
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+}
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
-// Remove old db so we start fresh
-if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
-if (fs.existsSync(DB_PATH + "-wal")) fs.unlinkSync(DB_PATH + "-wal");
-if (fs.existsSync(DB_PATH + "-shm")) fs.unlinkSync(DB_PATH + "-shm");
+if (RESET) {
+  // Explicit full wipe, e.g. for local dev. Never done implicitly - a
+  // redeploy running this same script via `npm run db:init` must not
+  // erase production data, so a reset requires this flag on purpose.
+  console.log("--reset passed: wiping existing db before reseeding");
+  await unlinkRequired(DB_PATH);
+  // WAL/SHM are auxiliary - best-effort only. Leaving a stale one behind
+  // is harmless once the main db file above is actually gone.
+  for (const suffix of ["-wal", "-shm"]) {
+    try {
+      if (fs.existsSync(DB_PATH + suffix)) fs.unlinkSync(DB_PATH + suffix);
+    } catch (e) {
+      console.warn(`  WARN: could not remove ${path.basename(DB_PATH + suffix)}: ${e.message}`);
+    }
+  }
+} else {
+  console.log(fs.existsSync(DB_PATH)
+    ? "Existing db found - applying seeds idempotently (pass --reset to wipe instead)"
+    : "No existing db - creating fresh");
+}
 
 const db = createClient({ url: `file:${DB_PATH}` });
 
@@ -70,7 +104,8 @@ for (const seed of seeds) {
       await db.execute(stmt);
       ok++;
     } catch (e) {
-      if (e.message.includes("already exists") || e.message.includes("UNIQUE constraint")) {
+      if (e.message.includes("already exists") || e.message.includes("UNIQUE constraint")
+          || e.message.includes("duplicate column name")) {
         skip++;
       } else {
         console.warn(`  WARN: ${e.message.slice(0, 100)}`);

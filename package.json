@@ -9,7 +9,9 @@
     "client": "vite client --config client/vite.config.ts",
     "build": "vite build --config client/vite.config.ts",
     "db:init": "node scripts/init-db.js",
+    "db:reset": "node scripts/init-db.js --reset",
     "start": "tsx server/index.ts",
+    "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p client/tsconfig.json"
   },
   "dependencies": {

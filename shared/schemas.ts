@@ -10,6 +10,7 @@ export const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY
 
 export const generateScheduleRequestSchema = z.object({
   date: dateSchema,
+  force: z.boolean().optional(),
 });
 export type GenerateScheduleRequest = z.infer<typeof generateScheduleRequestSchema>;
 
@@ -69,6 +70,15 @@ export const disruptionCreateRequestSchema = z.object({
   extra_hours: z.number().optional(),
 });
 export type DisruptionCreateRequest = z.infer<typeof disruptionCreateRequestSchema>;
+
+export const dailyCoverageCreateRequestSchema = z.object({
+  coverage_date: dateSchema,
+  custodian_id: z.number(),
+  period: z.enum(["morning", "afternoon"]),
+  assignment: z.string().min(1),
+  excluded_note: z.string().nullable().optional(),
+});
+export type DailyCoverageCreateRequest = z.infer<typeof dailyCoverageCreateRequestSchema>;
 
 export const aiRebalanceRequestSchema = z.object({
   date: dateSchema,

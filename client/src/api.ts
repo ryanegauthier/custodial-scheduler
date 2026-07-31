@@ -37,10 +37,10 @@ export const api = {
     fetch(`/api/custodians/${id}`, { method: "DELETE" }).then(r => r.json() as Promise<{ ok: true }>),
 
   getSchedule: (date: string) => getJSON<DailySchedule>(`/api/schedules?date=${date}`),
-  generateSchedule: (date: string) =>
+  generateSchedule: (date: string, force = false) =>
     postJSON<{ ok: true; date: string; tasks_created: number } | { error: string; count: number }>(
       "/api/schedules/generate",
-      { date },
+      { date, force },
     ),
 
   aiRebalance: (date: string) => postJSON<AIRebalanceResult>("/api/ai/rebalance", { date }),

@@ -67,11 +67,18 @@ export interface Custodian {
   id: number;
   name: string;
   shift_template_id: number;
+  team_id: number | null;
   active: number;
   notes: string | null;
   shift_name?: string | null;
   start_time?: string | null;
   productive_min?: number | null;
+}
+
+export interface Team {
+  id: number;
+  name: string;
+  notes: string | null;
 }
 
 export interface BuildingTask {
@@ -84,6 +91,7 @@ export interface BuildingTask {
   assigned_to: number | null;
   scheduled_start: string | null;
   scheduled_end: string | null;
+  period: "morning" | "afternoon" | null;
   task_name?: string;
   priority?: number;
   is_disruptive?: number;
@@ -105,6 +113,16 @@ export interface Disruption {
   resolved: number;
   custodian_name?: string | null;
   building_name?: string | null;
+}
+
+export interface DailyCoverage {
+  id: number;
+  coverage_date: string;
+  custodian_id: number;
+  period: "morning" | "afternoon";
+  assignment: string;
+  excluded_note: string | null;
+  custodian_name?: string;
 }
 
 export interface CustodianSchedule extends Custodian {

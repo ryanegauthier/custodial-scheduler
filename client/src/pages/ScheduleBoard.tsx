@@ -29,18 +29,24 @@ export default function ScheduleBoard() {
     }
   }
 
-  async function generateSchedule() {
+  async function generateSchedule(force = false) {
     setGenerating(true);
     try {
-      const { status } = await api.generateSchedule(date);
+      const { status } = await api.generateSchedule(date, force);
       if (status === 409) {
         setError("Schedule already exists for this date.");
       } else {
+        setError(null);
         await fetchSchedule(date);
       }
     } finally {
       setGenerating(false);
     }
+  }
+
+  function regenerateSchedule() {
+    if (!confirm(`Regenerate the schedule for ${date}? This replaces all current assignments for that day.`)) return;
+    generateSchedule(true);
   }
 
   async function handleCalloutRebalance() {
@@ -74,8 +80,13 @@ export default function ScheduleBoard() {
             onChange={e => setDate(e.target.value)}
           />
           {!hasSchedule && (
-            <button className="btn-primary" onClick={generateSchedule} disabled={generating}>
+            <button className="btn-primary" onClick={() => generateSchedule(false)} disabled={generating}>
               {generating ? "Generating…" : "Generate Schedule"}
+            </button>
+          )}
+          {hasSchedule && (
+            <button className="btn-secondary" onClick={regenerateSchedule} disabled={generating}>
+              {generating ? "Regenerating…" : "Regenerate"}
             </button>
           )}
           {hasSchedule && disruptions.length > 0 && (
@@ -187,15 +198,26 @@ export default function ScheduleBoard() {
                   {c.tasks.length === 0 && (
                     <div style={{ color: "var(--text-muted)", fontSize: 12, padding: "8px 4px" }}>No tasks assigned</div>
                   )}
-                  {c.tasks.map(t => (
-                    <div key={t.id} className={`task-row ${TASK_COLORS[t.priority ?? -1] || ""}`}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="task-building">{t.building_name}</div>
-                        <div className="task-type">{TASK_LABELS[t.task_type_id] || t.task_name}</div>
+                  {(["morning", "afternoon"] as const).map(period => {
+                    const tasks = c.tasks.filter(t => t.period === period);
+                    if (tasks.length === 0) return null;
+                    return (
+                      <div key={period}>
+                        <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", padding: "6px 4px 2px" }}>
+                          {period === "morning" ? "AM" : "PM"}
+                        </div>
+                        {tasks.map(t => (
+                          <div key={t.id} className={`task-row ${TASK_COLORS[t.priority ?? -1] || ""}`}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div className="task-building">{t.building_name}</div>
+                              <div className="task-type">{TASK_LABELS[t.task_type_id] || t.task_name}</div>
+                            </div>
+                            <div className="task-hours">{t.estimated_hours?.toFixed(1)}h</div>
+                          </div>
+                        ))}
                       </div>
-                      <div className="task-hours">{t.estimated_hours?.toFixed(1)}h</div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}
