@@ -132,3 +132,41 @@ test("fallback spreads a team's buildings across multiple custodians instead of 
   );
   assert.ok(assignedTo.size > 1, "expected Team 1's buildings to be handled by more than one custodian");
 });
+
+test("Trash (Common) always mirrors Trash (Classrooms)'s assignee and period", async () => {
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-01-01`).then(json<{ tasks: BuildingTask[] }>);
+  const byBuilding = new Map<number, BuildingTask[]>();
+  for (const t of schedule.tasks) {
+    if (!byBuilding.has(t.building_id)) byBuilding.set(t.building_id, []);
+    byBuilding.get(t.building_id)!.push(t);
+  }
+
+  let pairsChecked = 0;
+  for (const [buildingId, tasks] of byBuilding) {
+    const roomTrash = tasks.find(t => t.task_type_id === 3);
+    const commonTrash = tasks.find(t => t.task_type_id === 4);
+    if (!roomTrash || !commonTrash) continue;
+    pairsChecked++;
+    assert.equal(commonTrash.assigned_to, roomTrash.assigned_to,
+      `building ${buildingId}: common-area trash should go to the same person as room trash`);
+    assert.equal(commonTrash.period, roomTrash.period,
+      `building ${buildingId}: common-area trash should share room trash's AM/PM period`);
+  }
+  assert.ok(pairsChecked > 0, "expected at least one building with both trash task types to check");
+});
+
+test("buildings over the team-clean threshold split restrooms from the trash pair", async () => {
+  // Robinson Science Hall is ~10.7 daily hours - well over the 4hr
+  // team-clean threshold, so restrooms should go to someone other than
+  // whoever has the trash pair.
+  const robinson = await db.get<{ id: number }>("SELECT id FROM buildings WHERE name = 'Robinson Science Hall'");
+  assert.ok(robinson);
+
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-01-01`).then(json<{ tasks: BuildingTask[] }>);
+  const tasks = schedule.tasks.filter(t => t.building_id === robinson!.id);
+  const roomTrash = tasks.find(t => t.task_type_id === 3);
+  const restrooms = tasks.find(t => t.task_type_id === 2);
+  assert.ok(roomTrash && restrooms, "expected Robinson Science Hall to have both trash and restroom tasks");
+  assert.notEqual(restrooms!.assigned_to, roomTrash!.assigned_to,
+    "a >4hr building should split restrooms from whoever has the trash pair");
+});

@@ -32,11 +32,19 @@ router.post("/", async (req, res) => {
 router.patch("/:id", async (req, res) => {
   const parsed = custodianUpdateRequestSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { name, shift_template_id, active, notes } = parsed.data;
+  const { name, active, notes } = parsed.data;
   await db.run(`UPDATE custodians SET name = COALESCE(?, name),
-    shift_template_id = COALESCE(?, shift_template_id),
     active = COALESCE(?, active), notes = COALESCE(?, notes) WHERE id = ?`,
-    [name ?? null, shift_template_id ?? null, active ?? null, notes ?? null, req.params.id]);
+    [name ?? null, active ?? null, notes ?? null, req.params.id]);
+
+  // shift_template_id needs to support being explicitly cleared back to
+  // null (e.g. dragging a custodian back to "Unassigned"), which the
+  // COALESCE pattern above can't express - a null param there just keeps
+  // whatever value was already there instead of clearing it.
+  if ("shift_template_id" in req.body) {
+    await db.run("UPDATE custodians SET shift_template_id = ? WHERE id = ?",
+      [parsed.data.shift_template_id ?? null, req.params.id]);
+  }
   res.json({ ok: true });
 });
 

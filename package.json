@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "up": "node scripts/dev-up.js",
+    "down": "node scripts/dev-down.js",
     "server": "tsx watch server/index.ts",
     "client": "vite client --config client/vite.config.ts",
     "build": "vite build --config client/vite.config.ts",

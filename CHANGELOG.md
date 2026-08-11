@@ -12,6 +12,14 @@
   only zod-validated boundaries (request bodies, Claude's JSON output) get
   runtime safety. Accepted tradeoff, not a bug: these rows come from trusted
   internal queries, not external input.
+- `server/routes/ai.ts`'s `/rebalance` and `/callout-impact` routes join
+  `custodians` to `shift_templates` with an inner `JOIN` on
+  `c.shift_template_id`. Every real custodian (added from whiteboard data)
+  has `shift_template_id = NULL`, so that join matches nothing - both
+  routes silently return an empty custodian list for all real data, not
+  just missing shift info. Not fixed here; noticed while tracking down why
+  the Custodians page showed nobody (`shift_template_id` was never set for
+  any of them, since none of the whiteboards specified shift start times).
 - Residential buildings (halls not owned by any of the 6 teams) generate
   `building_tasks` rows tagged `period = 'afternoon'` but are never assigned
   to a custodian - `POST /api/schedules/generate` only auto-assigns common
@@ -237,3 +245,104 @@ Found while typing existing files for the migration above, not new work:
 
 - Added `img` - a folder of whiteboard photos used as source data for the
   changes above, not meant to be committed.
+
+---
+
+## 2026-07-31 (2)
+
+### `npm run up` / `npm run down` for the local dev server
+
+- `scripts/dev-up.js` starts `npm run dev` detached (server + client via
+  `concurrently`), logs to `.dev.log`, tracks the pid in `.dev.pid`.
+  `scripts/dev-down.js` reads that pid and stops the whole tree.
+- On Windows, `taskkill /PID <pid> /T /F` doesn't reliably catch everything -
+  `tsx watch`'s own hot-reload restart spawned a server process that
+  escaped the tracked tree in testing. `dev-down.js` follows up with a
+  fallback sweep of whatever's still listening on ports 3001/5173.
+- Log capture fought back on Windows specifically: Node's own
+  `child_process` shell redirection (`stdio` fds, and later a `>>` string
+  passed through `spawn(..., {shell:true})`) didn't survive inheritance
+  through the `npm -> concurrently -> tsx/vite` chain - the servers ran
+  fine, but `.dev.log` stayed empty either way. `Start-Process`'s own
+  `-RedirectStandardOutput`/`-Error` also can't both point at the same
+  file (Windows rejects that outright). Landed on: launch `cmd /c "npm run
+  dev >> .dev.log 2>&1"` via `Start-Process` - `cmd`'s own `2>&1` merges
+  the streams into one file before `Start-Process` is even involved.
+
+### Custodians page: fixed a real "why is this empty" bug, added drag-and-drop shift assignment
+
+- `client/src/pages/Custodians.tsx` grouped custodians into exactly 3 fixed
+  shift buckets (4am/5am/6am) by `shift_template_id`. None of the 20 real
+  custodians (added from whiteboard data) have a `shift_template_id` set -
+  none of the whiteboards specified shift start times - so all 20 fell
+  outside every bucket and the page rendered nobody. Added a 4th
+  "Unassigned Shift" bucket so people without one are actually visible.
+- `shared/types.ts`: `Custodian.shift_template_id` was typed as
+  non-nullable `number` while the real column (and API responses) can be
+  `null` - corrected to `number | null`.
+- Added native HTML5 drag-and-drop (no new dependency) to move a
+  custodian between shift buckets: rows are `draggable`, shift cards are
+  drop targets with a gold dashed outline while hovered.
+- That needed `PATCH /api/custodians/:id` to support clearing
+  `shift_template_id` back to `null` (dragging into "Unassigned"), which
+  it couldn't actually do - the route used
+  `shift_template_id = COALESCE(?, shift_template_id)`, and a `null`
+  param there means "keep the existing value," not "clear it." Fixed by
+  giving `shift_template_id` its own direct `UPDATE` (only run when the
+  key is present in the request body at all) instead of routing it through
+  the same `COALESCE` pattern as `name`/`active`/`notes`.
+  `custodianUpdateRequestSchema.shift_template_id` is now
+  `.nullable().optional()` to let that explicit `null` through validation.
+- `client/src/api.ts`: added `updateCustodian` + a `patchJSON` helper
+  (only `getJSON`/`postJSON` existed before).
+
+### Corrected the productive shift length: 7.5 hours, not 7.0
+
+- The real shift is 4:00am-12:30pm with a half-hour lunch (450 productive
+  minutes), not the 420 (7.0hr) the schema had. Fixed
+  `shift_templates.productive_min`'s default in
+  `seeds/002_whitworth_data.sql`, added
+  `seeds/009_shift_productive_hours.sql` to correct the value in
+  already-seeded databases (a column `DEFAULT` change alone doesn't touch
+  rows already inserted), and updated the one client-side fallback
+  (`Custodians.tsx`, for custodians with no shift assigned yet) from
+  420 to 450 for consistency.
+- Left `block1-3_min`/`break1-2_min`/`lunch_min` alone - confirmed via
+  grep that nothing outside the seed's own `CREATE TABLE` reads them, so
+  they're inert documentation columns, not something the productive-hours
+  fix needed to touch.
+
+### Trash pairing and team-clean threshold in schedule generation
+
+- `POST /api/schedules/generate`: Trash (Common) now always goes to
+  whoever has Trash (Classrooms) for the same building, with the same
+  AM/PM period - previously each task type was assigned independently,
+  so the two could land on different people. Trash (Common) no longer
+  consults its own carry-forward entry at all; it simply mirrors whatever
+  Trash (Classrooms) resolved to (carried or freshly picked), which also
+  self-corrects any pre-existing mismatched data from before this feature
+  existed.
+- For buildings whose total daily hours exceed 4 (a "team clean"
+  threshold), Restrooms is now assigned to someone other than whoever has
+  the trash pair, guaranteeing at least 2 people share a large building
+  instead of the least-hours algorithm happening to put everything on one
+  person. Floors/Vacuum and Spot Clean remain independently assigned, per
+  explicit choice not to bundle them in too.
+  `pickAssignee()` gained an optional exclude parameter for this.
+  Buildings at or under the threshold are unaffected - still whichever
+  single least-hours pick each task type happens to land on.
+- The assignment loop is now building-centric (one pass per building,
+  computing trash-pair and restroom assignees before iterating that
+  building's task rows) rather than a flat per-(building, task type)
+  loop, since these decisions now depend on each other within a building.
+- Caught in review before shipping: the building-centric rewrite's
+  residential-building branch dropped carry-forward entirely (`assigned_to`
+  was hardcoded `NULL` for every residential task, every time), silently
+  wiping any manually-assigned residential task on every regenerate. Fixed
+  before merging - residential buildings still don't get *fresh*
+  auto-assignment (unsolved, see Known Issues), but a prior manual
+  assignment now correctly survives regeneration again.
+- Added `tests/schedules-team-fallback.test.ts` coverage: the pairing
+  invariant (checked across every building with both trash task types,
+  not just one), and the restroom split on Robinson Science Hall
+  (~10.7 daily hours, real seed data).

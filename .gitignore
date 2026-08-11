@@ -5,3 +5,5 @@ client/dist
 CLAUDE.md
 .vscode
 img
+.dev.pid
+.dev.log

@@ -41,7 +41,7 @@ export type CustodianCreateRequest = z.infer<typeof custodianCreateRequestSchema
 
 export const custodianUpdateRequestSchema = z.object({
   name: z.string().min(1).optional(),
-  shift_template_id: z.number().optional(),
+  shift_template_id: z.number().nullable().optional(),
   active: z.number().optional(),
   notes: z.string().nullable().optional(),
 });

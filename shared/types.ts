@@ -66,7 +66,7 @@ export interface BuildingMapPoint {
 export interface Custodian {
   id: number;
   name: string;
-  shift_template_id: number;
+  shift_template_id: number | null;
   team_id: number | null;
   active: number;
   notes: string | null;

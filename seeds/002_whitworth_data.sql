@@ -3,7 +3,10 @@
 -- Generated from Custodial_APPA_Calculator.xlsx
 -- Building sqft sourced directly from WU Building Data sheet
 -- Daily hours calculated from APPA routine task rates at L2
--- Productive shift: 420 min (7 hrs) per Whitworth standard
+-- Productive shift: 450 min (7.5 hrs) per Whitworth standard (e.g. a
+-- 4:00am-12:30pm shift with a half-hour lunch). This describes staffing
+-- capacity, not workload - the daily_hours_l1/l2/l3 building figures below
+-- are APPA-rate-derived cleaning workload and don't depend on shift length.
 -- ============================================================
 
 PRAGMA foreign_keys = ON;
@@ -346,14 +349,16 @@ CREATE TABLE IF NOT EXISTS shift_templates (
     id                  INTEGER PRIMARY KEY,
     name                TEXT NOT NULL,
     start_time          TEXT NOT NULL,
-    productive_min      INTEGER DEFAULT 420,
+    productive_min      INTEGER DEFAULT 450,
     block1_min          INTEGER DEFAULT 120,
     break1_min          INTEGER DEFAULT 15,
     block2_min          INTEGER DEFAULT 120,
     lunch_min           INTEGER DEFAULT 30,
     block3_min          INTEGER DEFAULT 120,
     break2_min          INTEGER DEFAULT 15
-    -- block4 fills remaining productive time (~45 min)
+    -- block4 fills remaining productive time (~90 min). Shift span is
+    -- productive_min + break1 + lunch + break2 = 510 min (8.5 hrs),
+    -- e.g. the 4am shift runs 4:00am-12:30pm with a half-hour lunch.
 );
 
 INSERT INTO shift_templates (id, name, start_time) VALUES

@@ -138,52 +138,129 @@ router.post("/generate", async (req, res) => {
   const hours = new Map<number, number>();
   for (const c of activeCustodians) hours.set(c.id, 0);
 
-  function pickAssignee(): number | null {
-    if (activeCustodians.length === 0) return null;
-    return activeCustodians.reduce((least, c) =>
+  function pickAssignee(exclude?: number | null): number | null {
+    const pool = exclude == null ? activeCustodians : activeCustodians.filter(c => c.id !== exclude);
+    const candidates = pool.length > 0 ? pool : activeCustodians; // don't strand a building with nobody at all
+    if (candidates.length === 0) return null;
+    return candidates.reduce((least, c) =>
       (hours.get(c.id)! < hours.get(least.id)! ? c : least)).id;
   }
 
-  // Single pass, in building/task-type order: carried-forward and fresh
-  // assignments both accumulate into the same running `hours` totals, so
-  // whichever comes first for a given custodian is what fills their AM
-  // budget - there's no separate pre-seeding step to get out of sync with.
+  // Task types: 1 Floors/Vacuum, 2 Restrooms, 3 Trash (Classrooms),
+  // 4 Trash (Common), 5 Spot Clean.
+  const TRASH_CLASSROOMS = 3;
+  const TRASH_COMMON = 4;
+  const RESTROOMS = 2;
+  const TEAM_CLEAN_THRESHOLD_HOURS = 4;
+
   const ratios: Record<number, number> = { 1: 0.35, 2: 0.30, 3: 0.15, 4: 0.12, 5: 0.08 };
   let carriedForward = 0;
   let freshAssigned = 0;
 
+  function assignHours(custodianId: number | null, hrs: number): "morning" | "afternoon" {
+    if (custodianId == null) return "afternoon";
+    const before = hours.get(custodianId)!;
+    hours.set(custodianId, before + hrs);
+    return before < AM_TARGET_HOURS ? "morning" : "afternoon";
+  }
+
   for (const b of buildings) {
-    for (const tt of taskTypes) {
-      const hrs = +((b.daily_hours_l2 || 0) * (ratios[tt.id] || 0.1)).toFixed(3);
-      if (hrs <= 0.05) continue;
+    const taskRows = taskTypes
+      .map(tt => ({ tt, hrs: +((b.daily_hours_l2 || 0) * (ratios[tt.id] || 0.1)).toFixed(3) }))
+      .filter(r => r.hrs > 0.05);
+    if (taskRows.length === 0) continue;
 
-      const isResidential = !commonBuildingIds.has(b.id);
-      const carried = priorAssignments.get(`${b.id}-${tt.id}`) ?? null;
-      let assignedTo: number | null = null;
-      let period: "morning" | "afternoon" = "afternoon";
+    const isResidential = !commonBuildingIds.has(b.id);
+    if (isResidential) {
+      for (const r of taskRows) {
+        // No team owns residential buildings, so there's no fresh
+        // auto-assignment here (that's the deferred follow-up), but a
+        // prior *manual* assignment should still carry forward rather
+        // than silently getting wiped every time generate runs.
+        const carried = priorAssignments.get(`${b.id}-${r.tt.id}`) ?? null;
+        const assignedTo = carried && hours.has(carried) ? carried : null;
+        if (assignedTo) carriedForward++;
+        await db.run(`INSERT INTO building_tasks
+          (building_id, task_type_id, estimated_hours, schedule_date, status, assigned_to, period)
+          VALUES (?, ?, ?, ?, ?, ?, 'afternoon')`,
+          [b.id, r.tt.id, r.hrs, date, assignedTo ? "assigned" : "unassigned", assignedTo]);
+      }
+      continue;
+    }
 
+    const buildingTotalHrs = taskRows.reduce((s, r) => s + r.hrs, 0);
+    const teamClean = buildingTotalHrs > TEAM_CLEAN_THRESHOLD_HOURS;
+
+    // Trash (Common) always mirrors Trash (Classrooms)'s assignee and
+    // period for this building - whoever gets the room trash gets the
+    // common-area trash too, rather than each being picked independently.
+    const trashRow = taskRows.find(r => r.tt.id === TRASH_CLASSROOMS);
+    let trashAssignee: number | null = null;
+    let trashPeriod: "morning" | "afternoon" = "afternoon";
+    if (trashRow) {
+      const carried = priorAssignments.get(`${b.id}-${TRASH_CLASSROOMS}`) ?? null;
       if (carried && hours.has(carried)) {
-        assignedTo = carried;
+        trashAssignee = carried;
         carriedForward++;
-        if (!isResidential) {
-          const before = hours.get(assignedTo)!;
-          period = before < AM_TARGET_HOURS ? "morning" : "afternoon";
-          hours.set(assignedTo, before + hrs);
+      } else {
+        trashAssignee = pickAssignee();
+        if (trashAssignee != null) freshAssigned++;
+      }
+      trashPeriod = assignHours(trashAssignee, trashRow.hrs);
+    }
+    // Trash (Common)'s hours count toward the same person's running total
+    // (for fair future picks) even though its period just mirrors the
+    // trash row above rather than being independently derived.
+    const commonTrashRow = taskRows.find(r => r.tt.id === TRASH_COMMON);
+    if (commonTrashRow && trashAssignee != null) {
+      hours.set(trashAssignee, hours.get(trashAssignee)! + commonTrashRow.hrs);
+    }
+
+    // Restrooms: for buildings over the team-clean threshold, exclude
+    // whoever got the trash pair so the building isn't handled solo -
+    // otherwise picked the same way as any other task type.
+    const restroomRow = taskRows.find(r => r.tt.id === RESTROOMS);
+    let restroomAssignee: number | null = null;
+    let restroomPeriod: "morning" | "afternoon" = "afternoon";
+    if (restroomRow) {
+      const carried = priorAssignments.get(`${b.id}-${RESTROOMS}`) ?? null;
+      const carriedOk = carried && hours.has(carried) && !(teamClean && carried === trashAssignee);
+      if (carriedOk) {
+        restroomAssignee = carried;
+        carriedForward++;
+      } else {
+        restroomAssignee = pickAssignee(teamClean ? trashAssignee : null);
+        if (restroomAssignee != null) freshAssigned++;
+      }
+      restroomPeriod = assignHours(restroomAssignee, restroomRow.hrs);
+    }
+
+    for (const r of taskRows) {
+      let assignedTo: number | null;
+      let period: "morning" | "afternoon";
+
+      if (r.tt.id === TRASH_CLASSROOMS || r.tt.id === TRASH_COMMON) {
+        assignedTo = trashAssignee;
+        period = trashPeriod;
+      } else if (r.tt.id === RESTROOMS) {
+        assignedTo = restroomAssignee;
+        period = restroomPeriod;
+      } else {
+        const carried = priorAssignments.get(`${b.id}-${r.tt.id}`) ?? null;
+        if (carried && hours.has(carried)) {
+          assignedTo = carried;
+          carriedForward++;
+        } else {
+          assignedTo = pickAssignee();
+          if (assignedTo != null) freshAssigned++;
         }
-      } else if (!isResidential) {
-        assignedTo = pickAssignee();
-        if (assignedTo != null) {
-          const before = hours.get(assignedTo)!;
-          period = before < AM_TARGET_HOURS ? "morning" : "afternoon";
-          hours.set(assignedTo, before + hrs);
-          freshAssigned++;
-        }
+        period = assignHours(assignedTo, r.hrs);
       }
 
       await db.run(`INSERT INTO building_tasks
         (building_id, task_type_id, estimated_hours, schedule_date, status, assigned_to, period)
         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [b.id, tt.id, hrs, date, assignedTo ? "assigned" : "unassigned", assignedTo, period]);
+        [b.id, r.tt.id, r.hrs, date, assignedTo ? "assigned" : "unassigned", assignedTo, period]);
     }
   }
 
