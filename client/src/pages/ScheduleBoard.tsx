@@ -5,8 +5,11 @@ import type { AIRebalanceResult } from "@shared/schemas";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-const TASK_COLORS: Record<number, string> = { 1: "priority-1", 2: "priority-2", 3: "priority-3", 4: "priority-4", 5: "priority-5" };
-const TASK_LABELS: Record<number, string> = { 1: "Floors/Vac", 2: "Restrooms", 3: "Trash (Class)", 4: "Trash (Common)", 5: "Spot Clean" };
+// Hardcoded per the "7hr productive limit" indicator spec - distinct from
+// shift_templates.productive_min (7.5hr), which describes shift capacity,
+// not this UI warning threshold.
+const NEAR_LIMIT_HOURS = 6.5;
+const AT_LIMIT_HOURS = 7;
 
 export default function ScheduleBoard() {
   const [date, setDate] = useState(today());
@@ -64,14 +67,14 @@ export default function ScheduleBoard() {
 
   const hasSchedule = Boolean(schedule && schedule.tasks && schedule.tasks.length > 0);
   const disruptions = schedule?.disruptions || [];
-  const unassigned  = schedule?.unassigned_tasks || [];
+  const gaps = schedule?.coverage_gaps || [];
 
   return (
     <>
       <div className="page-header">
         <div>
           <div className="page-title">Daily Schedule</div>
-          <div className="page-subtitle">Assign custodians to buildings and tasks</div>
+          <div className="page-subtitle">Standing assignments, with today's exceptions</div>
         </div>
         <div className="flex gap-8 items-center">
           <input
@@ -139,41 +142,9 @@ export default function ScheduleBoard() {
         </div>
       )}
 
-      {/* Zone coverage summary */}
-      {schedule?.zone_coverage && (
-        <div className="card">
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12 }}>
-            Zone Coverage
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {schedule.zone_coverage.map(z => {
-              const pct = z.hours_needed > 0 ? Math.min(100, (z.hours_assigned / z.hours_needed) * 100) : 100;
-              const cls = pct < 50 ? "crit" : pct < 80 ? "warn" : "";
-              return (
-                <div key={z.zone.id}>
-                  <div className="flex justify-between items-center" style={{ marginBottom: 4 }}>
-                    <span style={{ fontSize: 13 }}>
-                      <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: z.zone.color ?? undefined, marginRight: 8, verticalAlign: "middle" }} />
-                      {z.zone.name}
-                    </span>
-                    <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: pct < 80 ? "var(--yellow)" : "var(--text-muted)" }}>
-                      {z.hours_assigned.toFixed(1)} / {z.hours_needed.toFixed(1)} hrs
-                    </span>
-                  </div>
-                  <div className="coverage-bar">
-                    <div className={`coverage-bar-fill ${cls}`} style={{ width: `${pct}%` }} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
       {loading && <div className="text-muted">Loading…</div>}
       {error && <div className="alert alert-err">{error}</div>}
 
-      {/* Custodian schedule cards */}
       {!loading && !hasSchedule && (
         <div className="card" style={{ textAlign: "center", padding: 40, color: "var(--text-muted)" }}>
           No schedule for {date}. Generate one to get started.
@@ -181,77 +152,81 @@ export default function ScheduleBoard() {
       )}
 
       {hasSchedule && schedule && (
-        <>
-          <div className="schedule-grid">
-            {schedule.custodians.map(c => (
-              <div key={c.id} className="custodian-card">
-                <div className="custodian-card-header">
-                  <div>
-                    <div className="custodian-name">{c.name}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                      {c.assigned_hours?.toFixed(1) || "0.0"} hrs assigned
+        <div className="schedule-columns">
+          {/* Left: custodians on today, with their standing buildings */}
+          <div>
+            <div className="column-heading">On Today ({schedule.custodians.length})</div>
+            <div className="schedule-grid">
+              {schedule.custodians.map(c => {
+                const hrs = c.assigned_hours || 0;
+                const limitClass = hrs >= AT_LIMIT_HOURS ? "at-limit" : hrs >= NEAR_LIMIT_HOURS ? "near-limit" : "";
+                return (
+                  <div key={c.id} className="custodian-card">
+                    <div className="custodian-card-header">
+                      <div>
+                        <div className="custodian-name">{c.name}</div>
+                        <div className={`custodian-hours ${limitClass}`} style={{ fontSize: 11, marginTop: 2 }}>
+                          {hrs.toFixed(1)} hrs
+                          {limitClass === "at-limit" && " · at 7hr limit"}
+                          {limitClass === "near-limit" && " · near 7hr limit"}
+                        </div>
+                      </div>
+                      <div className="custodian-shift">{c.start_time}</div>
+                    </div>
+                    <div className="custodian-tasks">
+                      {c.tasks.length === 0 && (
+                        <div style={{ color: "var(--text-muted)", fontSize: 12, padding: "8px 4px" }}>No buildings today</div>
+                      )}
+                      {c.tasks.map(t => (
+                        <div key={t.id} className="task-row">
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="task-building">{t.building_name}</div>
+                          </div>
+                          <div className="task-hours">{t.estimated_hours?.toFixed(1)}h</div>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                  <div className="custodian-shift">{c.start_time}</div>
-                </div>
-                <div className="custodian-tasks">
-                  {c.tasks.length === 0 && (
-                    <div style={{ color: "var(--text-muted)", fontSize: 12, padding: "8px 4px" }}>No tasks assigned</div>
-                  )}
-                  {(["morning", "afternoon"] as const).map(period => {
-                    const tasks = c.tasks.filter(t => t.period === period);
-                    if (tasks.length === 0) return null;
-                    return (
-                      <div key={period}>
-                        <div style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", padding: "6px 4px 2px" }}>
-                          {period === "morning" ? "AM" : "PM"}
-                        </div>
-                        {tasks.map(t => (
-                          <div key={t.id} className={`task-row ${TASK_COLORS[t.priority ?? -1] || ""}`}>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div className="task-building">{t.building_name}</div>
-                              <div className="task-type">{TASK_LABELS[t.task_type_id] || t.task_name}</div>
-                            </div>
-                            <div className="task-hours">{t.estimated_hours?.toFixed(1)}h</div>
-                          </div>
-                        ))}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
+                );
+              })}
+            </div>
           </div>
 
-          {/* Unassigned tasks */}
-          {unassigned.length > 0 && (
-            <div className="card">
-              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--red)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
-                ⚠️ {unassigned.length} Unassigned Tasks
+          {/* Right: coverage gaps - buildings whose custodian is out */}
+          <div>
+            <div className="column-heading">Coverage Gaps ({gaps.length})</div>
+            {gaps.length === 0 && (
+              <div className="card" style={{ textAlign: "center", padding: 24, color: "var(--text-muted)" }}>
+                No gaps - every standing assignment is covered today.
               </div>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Building</th>
-                    <th>Zone</th>
-                    <th>Task</th>
-                    <th>Hours</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {unassigned.map(t => (
-                    <tr key={t.id}>
-                      <td>{t.building_name}</td>
-                      <td><span style={{ color: t.zone_color ?? undefined, fontWeight: 500 }}>{t.zone_name}</span></td>
-                      <td>{TASK_LABELS[t.task_type_id] || t.task_name}</td>
-                      <td className="text-mono">{t.estimated_hours?.toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </>
+            )}
+            {gaps.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {gaps.map(g => (
+                  <div key={g.building_id} className="card gap-card">
+                    <div className="flex justify-between items-center">
+                      <div>
+                        <div className="gap-building">{g.building_name}</div>
+                        {g.zone_name && (
+                          <div style={{ fontSize: 12, color: g.zone_color ?? "var(--text-muted)", marginTop: 2 }}>
+                            {g.zone_name}
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <div className="gap-hours">{(g.daily_hours ?? 0).toFixed(1)}h</div>
+                        <div style={{ fontSize: 10, color: "var(--text-muted)", textAlign: "right", marginTop: 2 }}>L{g.target_appa_level}</div>
+                      </div>
+                    </div>
+                    <div className="gap-reason">
+                      {g.unavailable.map(u => `${u.custodian_name} (${u.status})`).join(", ")}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </>
   );

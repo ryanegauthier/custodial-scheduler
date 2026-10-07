@@ -47,9 +47,29 @@ export const custodianUpdateRequestSchema = z.object({
 });
 export type CustodianUpdateRequest = z.infer<typeof custodianUpdateRequestSchema>;
 
+export const assignmentCreateRequestSchema = z.object({
+  custodian_id: z.number(),
+  building_id: z.number(),
+  assignment_type: z.enum(["primary", "secondary"]).default("primary"),
+  days_of_week: z.string().nullable().optional(),
+  notes: z.string().nullable().optional(),
+});
+export type AssignmentCreateRequest = z.infer<typeof assignmentCreateRequestSchema>;
+
+export const custodianStatusCreateRequestSchema = z.object({
+  status: z.enum(["active", "fmla", "callout", "vacation"]),
+  effective_date: dateSchema.nullable().optional(),
+  end_date: dateSchema.nullable().optional(),
+  notes: z.string().nullable().optional(),
+});
+export type CustodianStatusCreateRequest = z.infer<typeof custodianStatusCreateRequestSchema>;
+
 export const buildingUpdateRequestSchema = z.object({
   zone_id: z.number().nullable().optional(),
-  target_appa_level: z.number().nullable().optional(),
+  // Only L1-L3 have an hours column on buildings (daily_hours_l1/l2/l3) -
+  // an L4/L5 value would silently have nothing for schedule generation to
+  // read.
+  target_appa_level: z.union([z.literal(1), z.literal(2), z.literal(3)]).nullable().optional(),
   notes: z.string().nullable().optional(),
 });
 export type BuildingUpdateRequest = z.infer<typeof buildingUpdateRequestSchema>;

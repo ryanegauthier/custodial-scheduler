@@ -81,6 +81,26 @@ export interface Team {
   notes: string | null;
 }
 
+export interface CustodianAssignment {
+  id: number;
+  custodian_id: number;
+  building_id: number;
+  assignment_type: "primary" | "secondary";
+  days_of_week: string | null;
+  notes: string | null;
+  custodian_name?: string;
+  building_name?: string;
+}
+
+export interface CustodianStatus {
+  id: number;
+  custodian_id: number;
+  status: "active" | "fmla" | "callout" | "vacation";
+  effective_date: string | null;
+  end_date: string | null;
+  notes: string | null;
+}
+
 export interface BuildingTask {
   id: number;
   building_id: number;
@@ -130,18 +150,24 @@ export interface CustodianSchedule extends Custodian {
   assigned_hours: number;
 }
 
-export interface ZoneCoverage {
-  zone: Zone;
-  hours_needed: number;
-  hours_assigned: number;
-  gap: number;
+export interface CoverageGap {
+  building_id: number;
+  building_name: string;
+  zone_id: number | null;
+  zone_name: string | null;
+  zone_color: string | null;
+  // Hours at the building's own target_appa_level (L1-L3), not always L2 -
+  // see buildings.target_appa_level.
+  daily_hours: number | null;
+  target_appa_level: number;
+  unavailable: { custodian_id: number; custodian_name: string; status: string }[];
 }
 
 export interface DailySchedule {
   date: string;
+  day_of_week: string;
   custodians: CustodianSchedule[];
   tasks: BuildingTask[];
   disruptions: Disruption[];
-  zone_coverage: ZoneCoverage[];
-  unassigned_tasks: BuildingTask[];
+  coverage_gaps: CoverageGap[];
 }

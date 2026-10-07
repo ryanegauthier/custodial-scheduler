@@ -1,14 +1,14 @@
-// Covers the AM/PM fallback logic in POST /api/schedules/generate: every
-// active custodian - team member or not - should get pulled into common
-// (team-owned) building work up to a ~4hr "morning" budget. Nobody gets
-// priority based on which team nominally owns a building; each task just
-// goes to whoever currently has the fewest hours. Anything beyond 4
-// hours, plus all residential-building tasks, is tagged "afternoon".
+// Covers the standing-assignment-specific behavior of POST
+// /api/schedules/generate and GET /api/schedules (seeds/010_standing_
+// assignments.sql): per-assignment days_of_week filtering, coverage gaps
+// when a custodian is unavailable, secondary assignments covering a
+// primary's absence, and custodian_status date-range resolution. This
+// file used to cover the old Team 1-6 fallback/AM-PM-budget algorithm,
+// which no longer exists - replaced in full rather than patched.
 //
 // This needs its own db/app instance (not shared with schedules.test.ts)
-// so "first schedule ever" is actually true here - server/db/index.ts
-// reads DB_PATH once at import time, so a fresh process per file is what
-// gives each test file its own db.
+// - server/db/index.ts reads DB_PATH once at import time, so a fresh
+// process per file is what gives each test file its own db.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -17,10 +17,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import type { BuildingTask } from "../shared/types";
+import type { DailySchedule } from "../shared/types";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-const tmpDir = mkdtempSync(path.join(tmpdir(), "custodial-team-fallback-"));
+const tmpDir = mkdtempSync(path.join(tmpdir(), "custodial-standing-"));
 const dbPath = path.join(tmpDir, "test.db");
 process.env.DB_PATH = dbPath;
 
@@ -58,115 +58,157 @@ after(async () => {
   }
 });
 
-test("first-ever generate gives every active custodian, including no-team ones, some morning work", async () => {
-  const result = await fetch(`${baseUrl}/api/schedules/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ date: "2031-01-01" }),
-  }).then(json<{ carried_forward: number; fresh_assigned: number }>);
-  assert.equal(result.carried_forward, 0, "first-ever schedule has nothing to carry forward");
-  assert.ok(result.fresh_assigned > 0);
-
-  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-01-01`).then(json<{ tasks: BuildingTask[] }>);
-
-  const noTeamCustodians = await db.all<{ id: number; name: string }>(
-    "SELECT id, name FROM custodians WHERE active = 1 AND team_id IS NULL");
-  assert.ok(noTeamCustodians.length > 0, "expected seed data to include no-team custodians (Carlie/Joe/Veronica/Brandon)");
-  for (const c of noTeamCustodians) {
-    const assignedHours = schedule.tasks
-      .filter(t => t.assigned_to === c.id)
-      .reduce((sum, t) => sum + t.estimated_hours, 0);
-    assert.ok(assignedHours > 0, `expected ${c.name} (no team) to receive some common-building work`);
+const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+function dayOfWeek(date: string): string {
+  return DAY_NAMES[new Date(`${date}T00:00:00`).getDay()];
+}
+// Find the next date on/after `fromDate` that falls on `targetDow`
+// ('mon'..'sun'), scanning forward day by day - avoids hardcoding a
+// literal date string whose weekday would have to be worked out by hand.
+function nextDateOnDow(fromDate: string, targetDow: string): string {
+  const d = new Date(`${fromDate}T00:00:00`);
+  for (let i = 0; i < 7; i++) {
+    if (DAY_NAMES[d.getDay()] === targetDow) return d.toISOString().slice(0, 10);
+    d.setDate(d.getDate() + 1);
   }
+  throw new Error(`no ${targetDow} found within a week of ${fromDate}`);
+}
+
+test("a days_of_week-restricted assignment only generates a task on its own days", async () => {
+  const yuriy = await db.get<{ id: number }>("SELECT id FROM custodians WHERE name = 'Yuriy'");
+  assert.ok(yuriy, "expected Yuriy (Tue-Sat only) in seed data");
+
+  const monday = nextDateOnDow("2031-05-01", "mon");
+  const tuesday = nextDateOnDow(monday, "tue");
+  assert.equal(dayOfWeek(monday), "mon");
+  assert.equal(dayOfWeek(tuesday), "tue");
+
+  await fetch(`${baseUrl}/api/schedules/generate`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date: monday }),
+  });
+  await fetch(`${baseUrl}/api/schedules/generate`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date: tuesday }),
+  });
+
+  const mondaySchedule = await fetch(`${baseUrl}/api/schedules?date=${monday}`).then(json<DailySchedule>);
+  const tuesdaySchedule = await fetch(`${baseUrl}/api/schedules?date=${tuesday}`).then(json<DailySchedule>);
+
+  const mondayYuriy = mondaySchedule.custodians.find(c => c.id === yuriy!.id);
+  const tuesdayYuriy = tuesdaySchedule.custodians.find(c => c.id === yuriy!.id);
+
+  assert.equal(mondayYuriy?.tasks.length ?? 0, 0, "Yuriy should have no standing-assignment tasks on a Monday");
+  assert.ok((tuesdayYuriy?.tasks.length ?? 0) > 0, "Yuriy should have his standing-assignment tasks on a Tuesday");
 });
 
-test("morning tasks stay near the 4-hour budget per custodian; overflow is tagged afternoon", async () => {
-  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-01-01`).then(json<{ tasks: BuildingTask[] }>);
+test("a callout on a building's only assignee produces a coverage gap", async () => {
+  const phil = await db.get<{ id: number }>("SELECT id FROM custodians WHERE name = 'Phil'");
+  const walt = await db.get<{ id: number; daily_hours_l2: number }>(
+    "SELECT id, daily_hours_l2 FROM buildings WHERE name = 'WALT'");
+  assert.ok(phil && walt, "expected Phil and WALT (Phil's sole standing assignment there) in seed data");
 
-  const morningHoursByCustodian = new Map<number, number>();
-  for (const t of schedule.tasks) {
-    if (t.period === "morning" && t.assigned_to) {
-      morningHoursByCustodian.set(t.assigned_to, (morningHoursByCustodian.get(t.assigned_to) ?? 0) + t.estimated_hours);
-    }
-  }
-  assert.ok(morningHoursByCustodian.size > 0, "expected at least some morning-tagged tasks");
-  for (const [custodianId, total] of morningHoursByCustodian) {
-    // The task that crosses the 4hr line still counts as morning, so this
-    // allows some slack rather than an exact cap.
-    assert.ok(total < 8, `custodian ${custodianId} has ${total}h of morning work, budget is ~4h`);
-  }
+  const date = "2031-05-10";
+  await fetch(`${baseUrl}/api/custodians/${phil!.id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "callout", effective_date: date, end_date: date }),
+  });
 
-  const hasAfternoon = schedule.tasks.some(t => t.period === "afternoon");
-  assert.ok(hasAfternoon, "expected some tasks to overflow into afternoon");
+  await fetch(`${baseUrl}/api/schedules/generate`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date, force: true }),
+  });
+
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+  const gap = schedule.coverage_gaps.find(g => g.building_id === walt!.id);
+  assert.ok(gap, "expected WALT to show up as a coverage gap while Phil is called out");
+  assert.equal(gap!.daily_hours, walt!.daily_hours_l2);
+  assert.ok(gap!.unavailable.some(u => u.custodian_id === phil!.id && u.status === "callout"));
+
+  const philSchedule = schedule.custodians.find(c => c.id === phil!.id);
+  assert.ok(!philSchedule?.tasks.some(t => t.building_id === walt!.id),
+    "Phil should not have a WALT task while called out");
 });
 
-test("residential buildings are tagged afternoon and left unassigned", async () => {
-  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-01-01`).then(json<{ tasks: BuildingTask[] }>);
-  const residentialBuildingIds = new Set(
-    (await db.all<{ id: number }>(
-      `SELECT b.id FROM buildings b
-       WHERE b.id NOT IN (SELECT building_id FROM team_buildings)`)).map(r => r.id),
-  );
-  const residentialTasks = schedule.tasks.filter(t => residentialBuildingIds.has(t.building_id));
-  assert.ok(residentialTasks.length > 0, "expected residential buildings to still generate tasks");
-  for (const t of residentialTasks) {
-    assert.equal(t.period, "afternoon");
-    assert.equal(t.assigned_to, null);
-  }
+test("a secondary assignee covers the primary's absence - no gap, and the secondary gets the task", async () => {
+  const olga = await db.get<{ id: number }>("SELECT id FROM custodians WHERE name = 'Olga'");
+  const bobbiann = await db.get<{ id: number }>("SELECT id FROM custodians WHERE name = 'Bobbiann'");
+  const weyerhaeuser = await db.get<{ id: number }>("SELECT id FROM buildings WHERE name = 'Weyerhaeuser Hall'");
+  assert.ok(olga && bobbiann && weyerhaeuser,
+    "expected Olga (primary) and Bobbiann (secondary) on Weyerhaeuser Hall in seed data");
+
+  const date = "2031-05-11";
+  await fetch(`${baseUrl}/api/custodians/${olga!.id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "vacation", effective_date: date, end_date: date }),
+  });
+
+  await fetch(`${baseUrl}/api/schedules/generate`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date, force: true }),
+  });
+
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+  assert.ok(!schedule.coverage_gaps.some(g => g.building_id === weyerhaeuser!.id),
+    "Weyerhaeuser Hall should not be a gap - Bobbiann (secondary) is still active");
+
+  const bobbiannSchedule = schedule.custodians.find(c => c.id === bobbiann!.id);
+  assert.ok(bobbiannSchedule?.tasks.some(t => t.building_id === weyerhaeuser!.id),
+    "expected Bobbiann to pick up Weyerhaeuser Hall while Olga is on vacation");
 });
 
-test("fallback spreads a team's buildings across multiple custodians instead of piling onto one person", async () => {
-  // No priority is given to a building's nominal team, but least-hours
-  // assignment should still naturally spread the work out - not always
-  // the same single custodian picking up every task.
-  const team1 = await db.get<{ id: number }>("SELECT id FROM teams WHERE name = 'Team 1'");
-  assert.ok(team1);
+test("lowering a building's target_appa_level changes the hours generate assigns", async () => {
+  const phil = await db.get<{ id: number }>("SELECT id FROM custodians WHERE name = 'Phil'");
+  const walt = await db.get<{ id: number; daily_hours_l2: number; daily_hours_l3: number }>(
+    "SELECT id, daily_hours_l2, daily_hours_l3 FROM buildings WHERE name = 'WALT'");
+  assert.ok(phil && walt);
+  assert.notEqual(walt!.daily_hours_l2, walt!.daily_hours_l3, "fixture assumes WALT's L2 and L3 hours differ");
 
-  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-01-01`).then(json<{ tasks: BuildingTask[] }>);
-  const team1BuildingIds = new Set(
-    (await db.all<{ building_id: number }>(
-      "SELECT building_id FROM team_buildings WHERE team_id = ?", [team1!.id])).map(r => r.building_id),
-  );
-  const assignedTo = new Set(
-    schedule.tasks.filter(t => team1BuildingIds.has(t.building_id) && t.assigned_to).map(t => t.assigned_to),
-  );
-  assert.ok(assignedTo.size > 1, "expected Team 1's buildings to be handled by more than one custodian");
+  const patchRes = await fetch(`${baseUrl}/api/buildings/${walt!.id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_appa_level: 3 }),
+  });
+  assert.equal(patchRes.status, 200);
+
+  const date = "2031-05-20";
+  await fetch(`${baseUrl}/api/schedules/generate`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date, force: true }),
+  });
+
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+  const philSchedule = schedule.custodians.find(c => c.id === phil!.id);
+  const waltTask = philSchedule?.tasks.find(t => t.building_id === walt!.id);
+  assert.ok(waltTask, "expected WALT to still be assigned to Phil at L3");
+  assert.equal(waltTask!.estimated_hours, walt!.daily_hours_l3,
+    "generate should use WALT's L3 hours now that its target_appa_level is 3, not L2");
 });
 
-test("Trash (Common) always mirrors Trash (Classrooms)'s assignee and period", async () => {
-  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-01-01`).then(json<{ tasks: BuildingTask[] }>);
-  const byBuilding = new Map<number, BuildingTask[]>();
-  for (const t of schedule.tasks) {
-    if (!byBuilding.has(t.building_id)) byBuilding.set(t.building_id, []);
-    byBuilding.get(t.building_id)!.push(t);
-  }
+test("an explicit active status row ends an earlier open-ended window early", async () => {
+  const created = await fetch(`${baseUrl}/api/custodians`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Test FMLA Person", shift_template_id: 1 }),
+  }).then(json<{ id: number }>);
 
-  let pairsChecked = 0;
-  for (const [buildingId, tasks] of byBuilding) {
-    const roomTrash = tasks.find(t => t.task_type_id === 3);
-    const commonTrash = tasks.find(t => t.task_type_id === 4);
-    if (!roomTrash || !commonTrash) continue;
-    pairsChecked++;
-    assert.equal(commonTrash.assigned_to, roomTrash.assigned_to,
-      `building ${buildingId}: common-area trash should go to the same person as room trash`);
-    assert.equal(commonTrash.period, roomTrash.period,
-      `building ${buildingId}: common-area trash should share room trash's AM/PM period`);
-  }
-  assert.ok(pairsChecked > 0, "expected at least one building with both trash task types to check");
-});
+  await fetch(`${baseUrl}/api/custodians/${created.id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "fmla", notes: "open-ended, no dates" }),
+  });
 
-test("buildings over the team-clean threshold split restrooms from the trash pair", async () => {
-  // Robinson Science Hall is ~10.7 daily hours - well over the 4hr
-  // team-clean threshold, so restrooms should go to someone other than
-  // whoever has the trash pair.
-  const robinson = await db.get<{ id: number }>("SELECT id FROM buildings WHERE name = 'Robinson Science Hall'");
-  assert.ok(robinson);
+  const whileOnFmla = await fetch(`${baseUrl}/api/custodians/${created.id}/status?date=2031-06-01`)
+    .then(json<{ status: string }>);
+  assert.equal(whileOnFmla.status, "fmla");
 
-  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-01-01`).then(json<{ tasks: BuildingTask[] }>);
-  const tasks = schedule.tasks.filter(t => t.building_id === robinson!.id);
-  const roomTrash = tasks.find(t => t.task_type_id === 3);
-  const restrooms = tasks.find(t => t.task_type_id === 2);
-  assert.ok(roomTrash && restrooms, "expected Robinson Science Hall to have both trash and restroom tasks");
-  assert.notEqual(restrooms!.assigned_to, roomTrash!.assigned_to,
-    "a >4hr building should split restrooms from whoever has the trash pair");
+  await fetch(`${baseUrl}/api/custodians/${created.id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "active", effective_date: "2031-06-15" }),
+  });
+
+  const beforeReturn = await fetch(`${baseUrl}/api/custodians/${created.id}/status?date=2031-06-10`)
+    .then(json<{ status: string }>);
+  assert.equal(beforeReturn.status, "fmla", "still fmla before the active row's effective_date");
+
+  const afterReturn = await fetch(`${baseUrl}/api/custodians/${created.id}/status?date=2031-06-20`)
+    .then(json<{ status: string }>);
+  assert.equal(afterReturn.status, "active", "the dated active row should win over the open-ended fmla row");
 });

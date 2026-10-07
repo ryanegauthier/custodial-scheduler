@@ -9,6 +9,7 @@ import schedulesRouter    from "./routes/schedules";
 import zonesRouter        from "./routes/zones";
 import disruptionsRouter  from "./routes/disruptions";
 import coverageRouter     from "./routes/coverage";
+import assignmentsRouter  from "./routes/assignments";
 import aiRouter           from "./routes/ai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,7 @@ app.use("/api/schedules",   schedulesRouter);
 app.use("/api/zones",       zonesRouter);
 app.use("/api/disruptions", disruptionsRouter);
 app.use("/api/coverage",    coverageRouter);
+app.use("/api/assignments", assignmentsRouter);
 app.use("/api/ai",          aiRouter);
 
 if (process.env.NODE_ENV === "production") {

@@ -20,11 +20,31 @@
   just missing shift info. Not fixed here; noticed while tracking down why
   the Custodians page showed nobody (`shift_template_id` was never set for
   any of them, since none of the whiteboards specified shift start times).
-- Residential buildings (halls not owned by any of the 6 teams) generate
-  `building_tasks` rows tagged `period = 'afternoon'` but are never assigned
-  to a custodian - `POST /api/schedules/generate` only auto-assigns common
-  (team-owned) buildings. Deferred deliberately, not a bug: scheduling
-  residential coverage is a separate follow-up task.
+- Two buildings on a standing assignment with two active `primary` assignees
+  can overlap on a shared day (e.g. Boppell Hall: Randall all-days primary +
+  Yuriy Tue-Sat primary) - `POST /api/schedules/generate` credits each
+  primary the building's full `daily_hours_l2` independently, so an
+  overlapping day double-counts that building's hours across two people.
+  The fix applied in 2026-10-07's entry below only suppresses a redundant
+  `secondary` row when a `primary` already covers the building - it
+  deliberately doesn't touch primary-primary overlap, since it's ambiguous
+  from the whiteboard whether that's an intentional team-clean day or a
+  transcription artifact. Not fixed.
+- `buildings.daily_hours_l2` was computed (seeds/001-002) as APPA-ratio
+  whole-building workload under the old multi-task-type/multi-person
+  algorithm, not calibrated as one standing-assignee's daily capacity. Now
+  that `POST /api/schedules/generate` assigns a building's full
+  `daily_hours_l2` to its one standing custodian, anyone with 2+ large
+  buildings shows a total well past a 7.5hr shift (e.g. Olga: Weyerhaeuser
+  Hall + Warren Hall = 22.8hrs/day) - confirmed visually, not a rendering
+  bug. The Daily Schedule page's "7hr limit" indicator will flag most of
+  the roster as a result; this reflects the input hours figures, not a
+  code defect. Not fixed - recalibrating `daily_hours_l2` for a
+  one-person-per-building model is a separate follow-up.
+- Amos ("Thu-Mon only... see worksheets") and Isaiah ("M-F") on the
+  2026-10-07 whiteboard have no building named at all - not seeded into
+  `custodian_assignments` (seeds/010). Both exist as active custodians
+  with zero standing assignments; seeding a guessed building was avoided.
 - `@libsql/client`'s local-file driver appears to hold an OS-level lock on a
   db file for the rest of a process's life once anything in that process has
   called `createClient()` on it, even read-only, even after `.close()`.
@@ -346,3 +366,256 @@ Found while typing existing files for the migration above, not new work:
   invariant (checked across every building with both trash task types,
   not just one), and the restroom split on Robinson Science Hall
   (~10.7 daily hours, real seed data).
+
+---
+
+## 2026-10-07
+
+### Replaced APPA-ratio schedule generation with standing custodian assignments
+
+The core model change: custodians have fixed standing building assignments
+that change ~once a semester, not daily. Daily scheduling is exception
+handling (callouts/FMLA/vacation) against those standing assignments, not a
+fresh per-day computation. This replaces the Team 1-6 / APPA-ratio algorithm
+added 2026-07-31 in full, not incrementally - confirmed with the user
+up front given the scope (13+ files) and the conflicts below, rather than
+assumed.
+
+- `seeds/010_standing_assignments.sql`: new `custodian_assignments`
+  (`custodian_id`, `building_id`, `assignment_type` primary|secondary,
+  `days_of_week`, `notes`) and `custodian_status` (`custodian_id`, `status`
+  active|fmla|callout|vacation, `effective_date`, `end_date`, `notes`)
+  tables, seeded from the current whiteboard (2026-10-07). Both use
+  explicit ids (project convention for curated seed data, e.g.
+  buildings/teams) so reseeding is idempotent via PK conflicts, rather than
+  the extra-unique-index approach `custodians`/`building_spaces` needed
+  (seeds/007) for their no-id inserts.
+- Roster conflict, resolved with the user before writing any seed data:
+  `custodians` already had 16 rows from the 2026-07-31 Team 1-6 whiteboard
+  round (seeds/004) plus Carlie/Joe/Veronica/Brandon from seeds/005's
+  summer-only crew - not empty, despite this task's brief assuming an
+  empty-table seed path. The new 20-name whiteboard was treated as
+  authoritative: Dale and Silas (seeds/004, not on the new board) are
+  deactivated (`active = 0`, not deleted, to keep `team_id` history);
+  Randall, Michael, and Amos are the only genuinely new names (the other
+  17 overlap by name, including 3 - Joe/Veronica/Brandon - that turned out
+  to already exist from seeds/005, not seeds/004, caught only by
+  diff-checking actual post-seed row counts against the expected 37
+  assignment rows after a first pass silently dropped to 30 - see below).
+- Real bug caught by running `scripts/init-db.js` and counting rows rather
+  than trusting the SQL at a glance: the first draft's
+  `INSERT INTO custodians (name) VALUES (...)` named all 6 "new" custodians
+  in one statement. Because 3 of them (Joe/Veronica/Brandon) already
+  existed, `idx_custodians_name`'s UNIQUE constraint failed the *entire*
+  statement - SQLite's default single-statement multi-row INSERT is
+  all-or-nothing, so Randall/Michael/Amos silently failed to insert too,
+  which then silently dropped their `custodian_assignments` rows (the
+  cross-join `WHERE c.name = '...'` subquery just matches zero rows for a
+  nonexistent custodian rather than erroring). Fixed by inserting only the
+  3 truly-new names; verified by re-running the seed and asserting
+  `custodian_assignments` has exactly 37 rows, not just that `db:init`
+  logged no warnings.
+- Whiteboard transcription assumptions, documented here rather than
+  guessed silently: "Auto Scrub" (Clif) and "Vac/Prog" (Ryan G) are
+  freeform duty notes with no distinct building, folded into the `notes`
+  column of an existing building row instead of modeled separately.
+  Yuriy/Michael/Amos/Isaiah's rows had a day-restriction string
+  ("Tue-Sat only" etc.) in the whiteboard's "Primary Buildings" column
+  instead of an actual building name, with their real buildings in
+  "Secondary/Notes" - read as a column swap for those four rows
+  specifically, not a secondary-assignment signal; Amos and Isaiah still
+  named no building at all even after that correction (see Known Issues).
+- `custodian_status` "active" semantics, confirmed with the user before
+  implementing: absence of any covering row means active. A status row's
+  `[effective_date, end_date]` window (either end nullable = open-ended)
+  determines coverage; when more than one row covers the same date, the
+  most specific (non-null `effective_date`) and latest-starting one wins -
+  so an explicit `active` row can end an earlier open-ended `fmla` row
+  early without deleting it. Implemented identically in both
+  `server/routes/schedules.ts` (`unavailableCustodianMap`) and
+  `server/routes/custodians.ts` (`GET /:id/status`).
+- `server/routes/schedules.ts`: `POST /generate` now loads the day's
+  standing assignments (filtered by `days_of_week` against the actual
+  day-of-week of the requested date), drops anyone unavailable per
+  `custodian_status`, and inserts one `building_tasks` row per remaining
+  assignment using `buildings.daily_hours_l2` as `estimated_hours` and a
+  new `task_types` row (id 6, "Standing Assignment") since the old
+  per-task-type APPA breakdown (Floors/Restrooms/Trash/Spot Clean) doesn't
+  apply to a whole-building standing assignment. Replaces the entire
+  carry-forward/AM-PM-budget/trash-pairing algorithm from 2026-07-31 - nothing
+  from it is reused, since none of it is meaningful once assignment is a
+  fixed lookup instead of a computed balance. `GET /` and `POST /generate`
+  both now also return `coverage_gaps`: buildings where every assignee
+  (primary or secondary) covering it that day is unavailable, with
+  `daily_hours_l2` shown so the supervisor can see the weight of the gap.
+  `zone_coverage`/`unassigned_tasks` (old response fields, only consumed by
+  the now-rewritten `ScheduleBoard.tsx`) were dropped rather than kept
+  dead; `DailySchedule`/`CoverageGap` types updated in `shared/types.ts`
+  to match.
+- Bug found and fixed only by actually running the generate flow in a
+  browser (per this file's "don't mark something as working without
+  running it" rule - screenshotted before and after): a `secondary`
+  assignment on a building with an active `primary` was inserting its own
+  full-`daily_hours_l2` `building_tasks` row every day alongside the
+  primary's, double-counting that building's hours under two people
+  simultaneously (Weyerhaeuser Hall showed 9.6hrs under both Olga and
+  Bobbiann on a day neither was out). `secondary` rows now only generate a
+  task when every `primary` assignment on that building is unavailable -
+  a secondary is backup coverage, materializing only when actually needed,
+  matching the already-correct `coverage_gaps` semantics ("anyone
+  available" = no gap). Verified by re-screenshotting: Bobbiann now shows
+  0hrs on a normal day, and the existing "secondary covers the primary's
+  absence" test still passes unchanged.
+- `server/routes/assignments.ts` (new): `GET/POST /api/assignments`,
+  `DELETE /api/assignments/:id` for standing-assignment CRUD. Registered
+  in `server/app.ts`.
+- `server/routes/custodians.ts`: added `GET/POST /:id/status`, resolving
+  and setting `custodian_status` rows per the semantics above.
+- `shared/schemas.ts`: `assignmentCreateRequestSchema`,
+  `custodianStatusCreateRequestSchema`.
+- `client/src/pages/ScheduleBoard.tsx`: rewritten to a two-column layout -
+  left column is custodians on today with their standing buildings and
+  hours (red/bold "at 7hr limit" at >=7hrs, yellow "near" at >=6.5hrs -
+  both hardcoded per the spec's "7hr productive limit" wording, distinct
+  from `shift_templates.productive_min` which is 7.5hrs and describes
+  shift capacity, not this warning threshold); right column is
+  `coverage_gaps`. The old "Generate Schedule" button itself had no
+  drag-drop (that lives in `Custodians.tsx`'s shift-bucket reassignment,
+  confirmed out of scope with the user and left untouched) - only the
+  APPA-ratio task-card grid and zone-coverage bar were replaced.
+- `client/src/pages/Assignments.tsx` (new), `client/src/App.tsx`: new nav
+  page mirroring the standing whiteboard, grouped by custodian with
+  primary/secondary badges, days, and notes; add/remove standing
+  assignments inline.
+- `client/src/api.ts`: added `getAssignments`/`addAssignment`/
+  `deleteAssignment`/`getCustodianStatus`/`setCustodianStatus`.
+- `tests/schedules.test.ts` / `tests/schedules-team-fallback.test.ts`:
+  rewritten in full (confirmed with the user first, since both files
+  tested the exact algorithm being deleted) to cover the standing-
+  assignment model instead: per-assignment `days_of_week` filtering,
+  coverage gaps on a callout, secondary-covers-primary's-absence, and
+  `custodian_status` date-range resolution including the dated-row-wins-
+  over-open-ended case.
+- Visually verified, not just typechecked: temporarily installed
+  Playwright again (flagged and confirmed with the user first, same as
+  the 2026-07-13 precedent), screenshotted the Daily Schedule and
+  Assignments pages in both themes, confirmed zero console errors, caught
+  the secondary-double-counting bug above this way, then uninstalled
+  Playwright.
+
+---
+
+## 2026-10-07 (2)
+
+### Made `buildings.target_appa_level` actually control schedule generation
+
+`target_appa_level` and `PATCH /api/buildings/:id` already existed, but
+nothing read the column - `POST /api/schedules/generate` hardcoded
+`daily_hours_l2` for every building regardless of it. Management had no way
+to lower a building's service level (and therefore its daily hours) to
+redistribute coverage when staffing drops. Scope confirmed with the user
+first (6 files) along with one open question - resolved as "per-building
+dropdown + a bulk-apply control", not a single global level, matching the
+column already being per-building.
+
+- `shared/schemas.ts`: `buildingUpdateRequestSchema.target_appa_level`
+  tightened from `z.number()` to a union of literals `1 | 2 | 3` - only
+  those three have an hours column on `buildings`
+  (`daily_hours_l1/l2/l3`); L4/L5 exist in `appa_service_levels` as a
+  reference table but buildings has no corresponding hours column, so
+  accepting them would silently have nothing for generate to read.
+- `server/routes/schedules.ts`: `getAssignmentsForDate()` now also selects
+  `daily_hours_l1`, `daily_hours_l3`, and `target_appa_level`; new
+  `hoursAtTargetLevel()` picks the right column (default L2, matching the
+  column's own `DEFAULT 2`) and is used both in `POST /generate`'s
+  `estimated_hours` insert and in `buildCoverageGaps()`.
+- `shared/types.ts`: `CoverageGap.daily_hours_l2` renamed to `daily_hours`
+  (+ added `target_appa_level`) since the figure shown is no longer always
+  L2 - updated the one call site in `ScheduleBoard.tsx` and one test
+  assertion in `tests/schedules-team-fallback.test.ts` to match.
+- `client/src/pages/Buildings.tsx`: was read-only before this - added a
+  per-row APPA Level dropdown (L1/L2/L3, calling `PATCH /api/buildings/:id`
+  via the new `api.updateBuilding`) plus checkbox selection and a bulk-apply
+  bar ("N selected - Set APPA level to [L_] - Apply to N") for changing
+  several buildings at once. The L1/L2/L3 hour columns now highlight
+  whichever one is the building's active level. Bulk apply fires one
+  `PATCH` per selected building via `Promise.all` rather than adding a new
+  batch endpoint - 43 buildings max, not worth a server-side batch route
+  for this volume.
+- `client/src/api.ts`: added `updateBuilding` (the PATCH route existed
+  with no client wrapper until now).
+- `tests/schedules-team-fallback.test.ts`: added coverage that lowering a
+  building's `target_appa_level` to 3 changes the hours the next
+  `/generate` assigns, from L2 to L3.
+- Verified by actually using the feature in a browser (not just
+  typecheck/build): temporarily reinstalled Playwright (same precedent as
+  above), changed WALT's level via its row dropdown, bulk-selected two more
+  buildings and applied L3 to both, confirmed the Buildings page's
+  per-level highlighting and running total updated correctly, then
+  regenerated the day's schedule and confirmed the custodians holding
+  those buildings showed the new (lower) L3 hours instead of L2 - then
+  uninstalled Playwright again.
+
+---
+
+## 2026-10-07 (3)
+
+### Assignments page restyled as a ledger table, matching the real whiteboard
+
+`img/oct01.jpg` (gitignored source photo, not committed - same handling as
+the other whiteboard photos) is the actual physical board
+`seeds/010_standing_assignments.sql` was transcribed from: two columns,
+"Building Coverage" and "Additional Coverage", one row per person. Asked
+to make the Assignments page look like it; confirmed scope first (which
+page, and structure-only vs. a literal whiteboard skin) since both were
+genuinely ambiguous from the request alone.
+
+- `client/src/pages/Assignments.tsx`: rewritten from one `<table>` per
+  custodian card to a single table with exactly that shape - Custodian /
+  Building Coverage / Additional Coverage columns, one row per custodian.
+  Each assignment renders as a small removable chip (`building name -
+  notes (days)`) instead of its own table row with a "Remove" button
+  column. Clicking a chip's `×` now removes it directly, no confirm()
+  dialog - chips read as lighter-weight than the old full table row, so
+  the extra confirmation step was dropped.
+- Every custodian from `GET /api/custodians` now gets a row, including
+  ones with zero standing assignments (Amos, Carlie, Hope, Isaiah,
+  Oksana) - rendered with `-` in both columns. The previous version only
+  showed custodians who already had at least one `custodian_assignments`
+  row, which silently hid anyone without one; the whiteboard itself shows
+  every roster member as a row, blank cells included, so this now matches
+  that structure, not just its styling.
+- Kept modern UI (existing theme tokens, fonts, table styles already in
+  `index.css`) rather than a literal whiteboard skin (ruled paper
+  background, marker colors) - confirmed with the user as the intended
+  fidelity level before building either.
+- New `.coverage-chip`/`.coverage-chip-secondary`/`.coverage-chip-remove`
+  styles in `index.css` - primary chips get a gold left border, secondary
+  chips blue, consistent with the gold/blue primary/secondary badge
+  colors already used elsewhere (e.g. the old per-row badges this
+  replaces).
+- Verified visually (Playwright, same temporary-install pattern as the
+  two entries above) in both themes - zero console errors, every
+  custodian row present including the zero-assignment ones.
+
+Comparing the actual photo against `seeds/010_standing_assignments.sql`
+surfaced discrepancies **not fixed in this entry** - the user asked for a
+visual change here, not a data correction, so these are flagged rather
+than silently patched:
+- Miaya's row appears to also name "Ballard" (Ballard Hall) alongside
+  Tacoma/Hendrick/Stewart 3 - not in the seed.
+- Andrew's building reads as "HSB" on the photo, transcribed as "HUB"
+  (Hixson Union Building) in the seed on the assumption it's the same
+  abbreviation Joe's row uses in full - not confirmed against the
+  photo's handwriting.
+- The photo has an asterisk/checkmark column between "Building Coverage"
+  and "Additional Coverage" (next to Clif, Ryan G, Andrew, Veronica,
+  Angela, Olga, Yuriy's rows) with a legend at the bottom - "Scotford,
+  Graves, Lower Fields, Golf, Maverik, Security, Jenkins Basement" - that
+  reads like a shared/rotating-duty list. Not modeled anywhere; meaning
+  unclear without asking the person who wrote it.
+- Hope's "Additional Coverage" cell says "Baby" (likely the reason for
+  her FMLA) - not captured; `custodian_status.notes` for her seed row
+  just says "Whiteboard: FMLA, no dates given."
+These would need the user's confirmation before changing seed data, same
+as the original roster/building-name assumptions earlier in this file.

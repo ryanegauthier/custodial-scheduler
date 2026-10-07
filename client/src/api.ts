@@ -2,13 +2,18 @@ import type {
   Building,
   BuildingMapPoint,
   Custodian,
+  CustodianAssignment,
+  CustodianStatus,
   DailySchedule,
   ZoneWithBuildings,
 } from "@shared/types";
 import type {
   AIRebalanceResult,
   AISuggestZonesResult,
+  AssignmentCreateRequest,
+  BuildingUpdateRequest,
   CustodianCreateRequest,
+  CustodianStatusCreateRequest,
   CustodianUpdateRequest,
 } from "@shared/schemas";
 
@@ -38,6 +43,8 @@ async function patchJSON<T>(url: string, body: unknown): Promise<{ status: numbe
 export const api = {
   getBuildings: () => getJSON<Building[]>("/api/buildings"),
   getBuildingsMap: () => getJSON<BuildingMapPoint[]>("/api/buildings/map"),
+  updateBuilding: (id: number, body: BuildingUpdateRequest) =>
+    patchJSON<{ ok: true }>(`/api/buildings/${id}`, body),
   getZones: () => getJSON<ZoneWithBuildings[]>("/api/zones"),
 
   getCustodians: () => getJSON<Custodian[]>("/api/custodians"),
@@ -54,6 +61,19 @@ export const api = {
       "/api/schedules/generate",
       { date, force },
     ),
+
+  getAssignments: () => getJSON<CustodianAssignment[]>("/api/assignments"),
+  addAssignment: (body: AssignmentCreateRequest) =>
+    postJSON<{ id: number }>("/api/assignments", body),
+  deleteAssignment: (id: number) =>
+    fetch(`/api/assignments/${id}`, { method: "DELETE" }).then(r => r.json() as Promise<{ ok: true }>),
+
+  getCustodianStatus: (id: number, date?: string) =>
+    getJSON<{ date: string; status: string; record: CustodianStatus | null }>(
+      `/api/custodians/${id}/status${date ? `?date=${date}` : ""}`,
+    ),
+  setCustodianStatus: (id: number, body: CustodianStatusCreateRequest) =>
+    postJSON<{ id: number }>(`/api/custodians/${id}/status`, body),
 
   aiRebalance: (date: string) => postJSON<AIRebalanceResult>("/api/ai/rebalance", { date }),
   aiSuggestZones: () => postJSON<AISuggestZonesResult>("/api/ai/suggest-zones", {}),

@@ -7,22 +7,151 @@ import {
   unassignTaskRequestSchema,
 } from "../../shared/schemas";
 import type {
-  Building,
   BuildingTask,
+  CoverageGap,
   Custodian,
   CustodianSchedule,
   Disruption,
-  Zone,
-  ZoneCoverage,
 } from "../../shared/types";
 
-interface TaskType {
-  id: number;
-  name: string;
-  priority: number;
+const router = Router();
+
+const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+
+// Standing assignments carry a whole building's daily hours as one block
+// (see seeds/010_standing_assignments.sql) rather than the old per-task-type
+// APPA breakdown, so building_tasks rows generated from them all use this
+// task type.
+const STANDING_ASSIGNMENT_TASK_TYPE = 6;
+
+function dayOfWeek(date: string): string {
+  return DAY_NAMES[new Date(`${date}T00:00:00`).getDay()];
 }
 
-const router = Router();
+function appliesToday(daysOfWeek: string | null, dow: string): boolean {
+  if (!daysOfWeek) return true;
+  return daysOfWeek.split(",").map(d => d.trim()).includes(dow);
+}
+
+interface AssignmentRow {
+  id: number;
+  custodian_id: number;
+  building_id: number;
+  assignment_type: "primary" | "secondary";
+  days_of_week: string | null;
+  notes: string | null;
+  custodian_name: string;
+  building_name: string;
+  zone_id: number | null;
+  zone_name: string | null;
+  zone_color: string | null;
+  daily_hours_l1: number | null;
+  daily_hours_l2: number | null;
+  daily_hours_l3: number | null;
+  target_appa_level: number | null;
+}
+
+// Hours at a building's own target_appa_level (defaults to L2, matching
+// buildings.target_appa_level's column default) - not always L2, now that
+// management can set a building to L1 or L3.
+function hoursAtTargetLevel(row: AssignmentRow): { hours: number | null; level: number } {
+  const level = row.target_appa_level ?? 2;
+  const hours = level === 1 ? row.daily_hours_l1 : level === 3 ? row.daily_hours_l3 : row.daily_hours_l2;
+  return { hours, level };
+}
+
+interface StatusRow {
+  custodian_id: number;
+  status: string;
+  effective_date: string | null;
+  end_date: string | null;
+}
+
+// A custodian is available on `date` unless the most specific status row
+// covering that date says otherwise - absence of any covering row means
+// active. An explicit 'active' row only matters for ending an earlier
+// fmla/callout/vacation window early (most specific = non-null
+// effective_date, then latest-starting, wins when more than one row
+// covers the same date).
+async function unavailableCustodianMap(date: string): Promise<Map<number, string>> {
+  const rows = await db.all<StatusRow>(
+    `SELECT custodian_id, status, effective_date, end_date FROM custodian_status
+     WHERE (effective_date IS NULL OR effective_date <= ?)
+       AND (end_date IS NULL OR end_date >= ?)`,
+    [date, date]);
+
+  const byCustodian = new Map<number, StatusRow[]>();
+  for (const r of rows) {
+    const list = byCustodian.get(r.custodian_id) ?? [];
+    list.push(r);
+    byCustodian.set(r.custodian_id, list);
+  }
+
+  const unavailable = new Map<number, string>();
+  for (const [custodianId, list] of byCustodian) {
+    list.sort((a, b) => {
+      if (!a.effective_date && b.effective_date) return 1;
+      if (a.effective_date && !b.effective_date) return -1;
+      return (b.effective_date ?? "").localeCompare(a.effective_date ?? "");
+    });
+    const current = list[0];
+    if (current.status !== "active") unavailable.set(custodianId, current.status);
+  }
+  return unavailable;
+}
+
+async function getAssignmentsForDate(date: string) {
+  const assignments = await db.all<AssignmentRow>(`
+    SELECT ca.*, c.name as custodian_name, b.name as building_name,
+           b.zone_id, z.name as zone_name, z.color as zone_color,
+           b.daily_hours_l1, b.daily_hours_l2, b.daily_hours_l3, b.target_appa_level
+    FROM custodian_assignments ca
+    JOIN custodians c ON c.id = ca.custodian_id AND c.active = 1
+    JOIN buildings b ON b.id = ca.building_id
+    LEFT JOIN zones z ON z.id = b.zone_id
+  `);
+  const dow = dayOfWeek(date);
+  const todays = assignments.filter(a => appliesToday(a.days_of_week, dow));
+  const unavailable = await unavailableCustodianMap(date);
+  return { assignments: todays, unavailable };
+}
+
+// A building is a coverage gap when every standing assignment covering it
+// today belongs to an unavailable custodian - a secondary assignee who is
+// still active covers the primary's absence, so no gap is reported.
+async function buildCoverageGaps(date: string): Promise<CoverageGap[]> {
+  const { assignments, unavailable } = await getAssignmentsForDate(date);
+
+  const byBuilding = new Map<number, AssignmentRow[]>();
+  for (const a of assignments) {
+    const list = byBuilding.get(a.building_id) ?? [];
+    list.push(a);
+    byBuilding.set(a.building_id, list);
+  }
+
+  const gaps: CoverageGap[] = [];
+  for (const rows of byBuilding.values()) {
+    const anyoneAvailable = rows.some(r => !unavailable.has(r.custodian_id));
+    if (anyoneAvailable) continue;
+    const first = rows[0];
+    const { hours, level } = hoursAtTargetLevel(first);
+    gaps.push({
+      building_id: first.building_id,
+      building_name: first.building_name,
+      zone_id: first.zone_id,
+      zone_name: first.zone_name,
+      zone_color: first.zone_color,
+      daily_hours: hours,
+      target_appa_level: level,
+      unavailable: rows.map(r => ({
+        custodian_id: r.custodian_id,
+        custodian_name: r.custodian_name,
+        status: unavailable.get(r.custodian_id) ?? "unknown",
+      })),
+    });
+  }
+  return gaps.sort((a, b) => (b.daily_hours ?? 0) - (a.daily_hours ?? 0));
+}
 
 router.get("/", async (req, res) => {
   const date = (req.query.date as string) || new Date().toISOString().slice(0, 10);
@@ -57,24 +186,13 @@ router.get("/", async (req, res) => {
     }
   }
 
-  const zones = await db.all<Zone>("SELECT * FROM zones ORDER BY name");
-  const zoneCoverage: ZoneCoverage[] = await Promise.all(zones.map(async z => {
-    const zoneBuildings = await db.all<Pick<Building, "id" | "daily_hours_l2">>(
-      "SELECT id, name, daily_hours_l2 FROM buildings WHERE zone_id = ?", [z.id]);
-    const needed = zoneBuildings.reduce((s, b) => s + (b.daily_hours_l2 || 0), 0);
-    const assigned = tasks.filter(t => t.zone_id === z.id && t.assigned_to)
-      .reduce((s, t) => s + t.estimated_hours, 0);
-    return { zone: z, hours_needed: +needed.toFixed(2), hours_assigned: +assigned.toFixed(2),
-      gap: +(needed - assigned).toFixed(2) };
-  }));
-
   res.json({
     date,
+    day_of_week: dayOfWeek(date),
     custodians: Object.values(custodianMap),
     tasks,
     disruptions,
-    zone_coverage: zoneCoverage,
-    unassigned_tasks: tasks.filter(t => !t.assigned_to),
+    coverage_gaps: await buildCoverageGaps(date),
   });
 });
 
@@ -99,180 +217,38 @@ router.post("/generate", async (req, res) => {
   await db.run("DELETE FROM disruptions WHERE disruption_date < date('now', ?)", [`-${RETENTION_DAYS} days`]);
   await db.run("DELETE FROM daily_coverage WHERE coverage_date < date('now', ?)", [`-${RETENTION_DAYS} days`]);
 
-  const buildings = await db.all<Building>(
-    "SELECT * FROM buildings WHERE daily_hours_l2 > 0 ORDER BY zone_id, daily_hours_l2 DESC");
-  const taskTypes = await db.all<TaskType>("SELECT * FROM task_types ORDER BY priority");
+  // Load today's standing assignments and drop anyone on fmla/callout/
+  // vacation. A secondary assignment only generates a task when every
+  // primary assignment on that building is unavailable - it's backup
+  // coverage, not a second simultaneous full-hours shift on top of an
+  // already-covered building (otherwise a building with both an active
+  // primary and an active secondary would double-count its daily hours
+  // under two people every day). Buildings left with nobody covering
+  // them show up in coverage_gaps instead of getting an unassigned row.
+  const { assignments, unavailable } = await getAssignmentsForDate(date);
 
-  // Use the most recent prior schedule as a starting point: same
-  // building+task assignments carry forward so the supervisor is
-  // adjusting yesterday's plan rather than starting from a blank one.
-  const prior = await db.get<{ last_date: string | null }>(
-    "SELECT MAX(schedule_date) as last_date FROM building_tasks WHERE schedule_date < ?", [date]);
+  const availablePrimaryBuildings = new Set(
+    assignments
+      .filter(a => a.assignment_type === "primary" && !unavailable.has(a.custodian_id))
+      .map(a => a.building_id));
 
-  const priorAssignments = new Map<string, number>();
-  if (prior?.last_date) {
-    const rows = await db.all<{ building_id: number; task_type_id: number; assigned_to: number }>(
-      `SELECT bt.building_id, bt.task_type_id, bt.assigned_to
-       FROM building_tasks bt
-       JOIN custodians c ON c.id = bt.assigned_to AND c.active = 1
-       WHERE bt.schedule_date = ? AND bt.assigned_to IS NOT NULL`, [prior.last_date]);
-    for (const r of rows) priorAssignments.set(`${r.building_id}-${r.task_type_id}`, r.assigned_to);
+  let tasksCreated = 0;
+  for (const a of assignments) {
+    if (unavailable.has(a.custodian_id)) continue;
+    if (a.assignment_type === "secondary" && availablePrimaryBuildings.has(a.building_id)) continue;
+    await db.run(`INSERT INTO building_tasks
+      (building_id, task_type_id, estimated_hours, schedule_date, status, assigned_to)
+      VALUES (?, ?, ?, ?, 'assigned', ?)`,
+      [a.building_id, STANDING_ASSIGNMENT_TASK_TYPE, hoursAtTargetLevel(a).hours ?? 0, date, a.custodian_id]);
+    tasksCreated++;
   }
 
-  // Every active custodian should have ~4 hours of "morning" work from
-  // common (team-owned) buildings. Team rosters/assignments come from a
-  // set of example whiteboards, not a hard constraint, so nobody gets
-  // priority based on which team nominally owns a building - each common
-  // task just goes to whichever active custodian currently has the fewest
-  // hours so far. Anything a custodian gets after already reaching 4
-  // hours is tagged "afternoon" instead, same as all residential-building
-  // tasks (no team owns those, so they're tagged but left unassigned -
-  // residential assignment is a follow-up, not solved here).
-  const AM_TARGET_HOURS = 4;
-
-  const teamBuildingRows = await db.all<{ building_id: number }>(
-    "SELECT DISTINCT building_id FROM team_buildings");
-  const commonBuildingIds = new Set(teamBuildingRows.map(r => r.building_id));
-
-  const activeCustodians = await db.all<{ id: number }>("SELECT id FROM custodians WHERE active = 1 ORDER BY id");
-  const hours = new Map<number, number>();
-  for (const c of activeCustodians) hours.set(c.id, 0);
-
-  function pickAssignee(exclude?: number | null): number | null {
-    const pool = exclude == null ? activeCustodians : activeCustodians.filter(c => c.id !== exclude);
-    const candidates = pool.length > 0 ? pool : activeCustodians; // don't strand a building with nobody at all
-    if (candidates.length === 0) return null;
-    return candidates.reduce((least, c) =>
-      (hours.get(c.id)! < hours.get(least.id)! ? c : least)).id;
-  }
-
-  // Task types: 1 Floors/Vacuum, 2 Restrooms, 3 Trash (Classrooms),
-  // 4 Trash (Common), 5 Spot Clean.
-  const TRASH_CLASSROOMS = 3;
-  const TRASH_COMMON = 4;
-  const RESTROOMS = 2;
-  const TEAM_CLEAN_THRESHOLD_HOURS = 4;
-
-  const ratios: Record<number, number> = { 1: 0.35, 2: 0.30, 3: 0.15, 4: 0.12, 5: 0.08 };
-  let carriedForward = 0;
-  let freshAssigned = 0;
-
-  function assignHours(custodianId: number | null, hrs: number): "morning" | "afternoon" {
-    if (custodianId == null) return "afternoon";
-    const before = hours.get(custodianId)!;
-    hours.set(custodianId, before + hrs);
-    return before < AM_TARGET_HOURS ? "morning" : "afternoon";
-  }
-
-  for (const b of buildings) {
-    const taskRows = taskTypes
-      .map(tt => ({ tt, hrs: +((b.daily_hours_l2 || 0) * (ratios[tt.id] || 0.1)).toFixed(3) }))
-      .filter(r => r.hrs > 0.05);
-    if (taskRows.length === 0) continue;
-
-    const isResidential = !commonBuildingIds.has(b.id);
-    if (isResidential) {
-      for (const r of taskRows) {
-        // No team owns residential buildings, so there's no fresh
-        // auto-assignment here (that's the deferred follow-up), but a
-        // prior *manual* assignment should still carry forward rather
-        // than silently getting wiped every time generate runs.
-        const carried = priorAssignments.get(`${b.id}-${r.tt.id}`) ?? null;
-        const assignedTo = carried && hours.has(carried) ? carried : null;
-        if (assignedTo) carriedForward++;
-        await db.run(`INSERT INTO building_tasks
-          (building_id, task_type_id, estimated_hours, schedule_date, status, assigned_to, period)
-          VALUES (?, ?, ?, ?, ?, ?, 'afternoon')`,
-          [b.id, r.tt.id, r.hrs, date, assignedTo ? "assigned" : "unassigned", assignedTo]);
-      }
-      continue;
-    }
-
-    const buildingTotalHrs = taskRows.reduce((s, r) => s + r.hrs, 0);
-    const teamClean = buildingTotalHrs > TEAM_CLEAN_THRESHOLD_HOURS;
-
-    // Trash (Common) always mirrors Trash (Classrooms)'s assignee and
-    // period for this building - whoever gets the room trash gets the
-    // common-area trash too, rather than each being picked independently.
-    const trashRow = taskRows.find(r => r.tt.id === TRASH_CLASSROOMS);
-    let trashAssignee: number | null = null;
-    let trashPeriod: "morning" | "afternoon" = "afternoon";
-    if (trashRow) {
-      const carried = priorAssignments.get(`${b.id}-${TRASH_CLASSROOMS}`) ?? null;
-      if (carried && hours.has(carried)) {
-        trashAssignee = carried;
-        carriedForward++;
-      } else {
-        trashAssignee = pickAssignee();
-        if (trashAssignee != null) freshAssigned++;
-      }
-      trashPeriod = assignHours(trashAssignee, trashRow.hrs);
-    }
-    // Trash (Common)'s hours count toward the same person's running total
-    // (for fair future picks) even though its period just mirrors the
-    // trash row above rather than being independently derived.
-    const commonTrashRow = taskRows.find(r => r.tt.id === TRASH_COMMON);
-    if (commonTrashRow && trashAssignee != null) {
-      hours.set(trashAssignee, hours.get(trashAssignee)! + commonTrashRow.hrs);
-    }
-
-    // Restrooms: for buildings over the team-clean threshold, exclude
-    // whoever got the trash pair so the building isn't handled solo -
-    // otherwise picked the same way as any other task type.
-    const restroomRow = taskRows.find(r => r.tt.id === RESTROOMS);
-    let restroomAssignee: number | null = null;
-    let restroomPeriod: "morning" | "afternoon" = "afternoon";
-    if (restroomRow) {
-      const carried = priorAssignments.get(`${b.id}-${RESTROOMS}`) ?? null;
-      const carriedOk = carried && hours.has(carried) && !(teamClean && carried === trashAssignee);
-      if (carriedOk) {
-        restroomAssignee = carried;
-        carriedForward++;
-      } else {
-        restroomAssignee = pickAssignee(teamClean ? trashAssignee : null);
-        if (restroomAssignee != null) freshAssigned++;
-      }
-      restroomPeriod = assignHours(restroomAssignee, restroomRow.hrs);
-    }
-
-    for (const r of taskRows) {
-      let assignedTo: number | null;
-      let period: "morning" | "afternoon";
-
-      if (r.tt.id === TRASH_CLASSROOMS || r.tt.id === TRASH_COMMON) {
-        assignedTo = trashAssignee;
-        period = trashPeriod;
-      } else if (r.tt.id === RESTROOMS) {
-        assignedTo = restroomAssignee;
-        period = restroomPeriod;
-      } else {
-        const carried = priorAssignments.get(`${b.id}-${r.tt.id}`) ?? null;
-        if (carried && hours.has(carried)) {
-          assignedTo = carried;
-          carriedForward++;
-        } else {
-          assignedTo = pickAssignee();
-          if (assignedTo != null) freshAssigned++;
-        }
-        period = assignHours(assignedTo, r.hrs);
-      }
-
-      await db.run(`INSERT INTO building_tasks
-        (building_id, task_type_id, estimated_hours, schedule_date, status, assigned_to, period)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [b.id, r.tt.id, r.hrs, date, assignedTo ? "assigned" : "unassigned", assignedTo, period]);
-    }
-  }
-
-  const count = await db.get<{ cnt: number }>(
-    "SELECT COUNT(*) as cnt FROM building_tasks WHERE schedule_date = ?", [date]);
   res.json({
     ok: true,
     date,
-    tasks_created: count?.cnt ?? 0,
-    carried_forward: carriedForward,
-    carried_forward_from: carriedForward > 0 ? prior?.last_date : null,
-    fresh_assigned: freshAssigned,
+    day_of_week: dayOfWeek(date),
+    tasks_created: tasksCreated,
+    coverage_gaps: await buildCoverageGaps(date),
   });
 });
 

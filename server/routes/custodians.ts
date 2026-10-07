@@ -1,7 +1,11 @@
 import { Router } from "express";
 import db from "../db/index";
-import { custodianCreateRequestSchema, custodianUpdateRequestSchema } from "../../shared/schemas";
-import type { Custodian } from "../../shared/types";
+import {
+  custodianCreateRequestSchema,
+  custodianStatusCreateRequestSchema,
+  custodianUpdateRequestSchema,
+} from "../../shared/schemas";
+import type { Custodian, CustodianStatus } from "../../shared/types";
 
 const router = Router();
 
@@ -51,6 +55,38 @@ router.patch("/:id", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   await db.run("UPDATE custodians SET active = 0 WHERE id = ?", [req.params.id]);
   res.json({ ok: true });
+});
+
+// Current status as of a date (default: today) - the most specific row
+// (non-null effective_date, then latest-starting) whose [effective_date,
+// end_date] window covers it; no covering row means active. Mirrors the
+// resolution logic in server/routes/schedules.ts.
+router.get("/:id/status", async (req, res) => {
+  const date = (req.query.date as string) || new Date().toISOString().slice(0, 10);
+  const rows = await db.all<CustodianStatus>(
+    `SELECT * FROM custodian_status WHERE custodian_id = ?
+       AND (effective_date IS NULL OR effective_date <= ?)
+       AND (end_date IS NULL OR end_date >= ?)`,
+    [req.params.id, date, date]);
+
+  rows.sort((a, b) => {
+    if (!a.effective_date && b.effective_date) return 1;
+    if (a.effective_date && !b.effective_date) return -1;
+    return (b.effective_date ?? "").localeCompare(a.effective_date ?? "");
+  });
+
+  res.json({ date, status: rows[0]?.status ?? "active", record: rows[0] ?? null });
+});
+
+router.post("/:id/status", async (req, res) => {
+  const parsed = custodianStatusCreateRequestSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const { status, effective_date, end_date, notes } = parsed.data;
+  const r = await db.run(
+    `INSERT INTO custodian_status (custodian_id, status, effective_date, end_date, notes)
+     VALUES (?, ?, ?, ?, ?)`,
+    [req.params.id, status, effective_date ?? null, end_date ?? null, notes ?? null]);
+  res.json({ id: Number(r.lastInsertRowid) });
 });
 
 export default router;

@@ -1,6 +1,10 @@
-// Covers POST /api/schedules/generate: carrying forward the previous
-// schedule's assignments onto a newly generated date, and pruning
-// schedule-dated rows older than the retention window.
+// Covers POST /api/schedules/generate against the standing-assignment
+// model (seeds/010_standing_assignments.sql): one building_tasks row per
+// available standing assignment, force/409 behavior, and retention
+// pruning. Carry-forward/AM-PM-budget/trash-pairing coverage was removed
+// here along with the APPA-ratio algorithm it tested - standing
+// assignments are read fresh from custodian_assignments every call, there
+// is nothing to carry forward.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -9,7 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import type { BuildingTask } from "../shared/types";
+import type { BuildingTask, DailySchedule } from "../shared/types";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const tmpDir = mkdtempSync(path.join(tmpdir(), "custodial-schedules-"));
@@ -50,46 +54,26 @@ after(async () => {
   }
 });
 
-test("generate carries forward the previous day's assignments", async () => {
-  const dayOne = await fetch(`${baseUrl}/api/schedules/generate`, {
+test("generate inserts one building_tasks row per standing assignment and GET exposes it under the right custodian", async () => {
+  const result = await fetch(`${baseUrl}/api/schedules/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ date: "2031-03-01" }),
-  }).then(json<{ tasks_created: number; carried_forward: number }>);
-  assert.equal(dayOne.carried_forward, 0, "first-ever schedule has nothing to carry forward");
-  assert.ok(dayOne.tasks_created > 0);
+    body: JSON.stringify({ date: "2031-04-01" }),
+  }).then(json<{ tasks_created: number }>);
+  assert.ok(result.tasks_created > 0);
 
-  const scheduleOne = await fetch(`${baseUrl}/api/schedules?date=2031-03-01`)
-    .then(json<{ unassigned_tasks: BuildingTask[] }>);
-  const task = scheduleOne.unassigned_tasks[0];
-  assert.ok(task, "expected at least one unassigned task to test with");
+  const phil = await db.get<{ id: number }>("SELECT id FROM custodians WHERE name = 'Phil'");
+  const walt = await db.get<{ id: number; daily_hours_l2: number }>(
+    "SELECT id, daily_hours_l2 FROM buildings WHERE name = 'WALT'");
+  assert.ok(phil && walt, "expected Phil and WALT in seed data");
 
-  const custodian = await db.get<{ id: number }>("SELECT id FROM custodians WHERE active = 1 LIMIT 1");
-  assert.ok(custodian, "expected at least one active custodian in seed data");
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-04-01`).then(json<DailySchedule>);
+  const philSchedule = schedule.custodians.find(c => c.id === phil!.id);
+  assert.ok(philSchedule, "expected Phil to appear in the day's schedule");
 
-  const assignRes = await fetch(`${baseUrl}/api/schedules/assign`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_id: task.id, custodian_id: custodian!.id }),
-  }).then(json<{ ok: boolean }>);
-  assert.equal(assignRes.ok, true);
-
-  const dayTwo = await fetch(`${baseUrl}/api/schedules/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ date: "2031-03-02" }),
-  }).then(json<{ carried_forward: number; carried_forward_from: string | null }>);
-  assert.equal(dayTwo.carried_forward_from, "2031-03-01");
-  assert.ok(dayTwo.carried_forward >= 1, "expected the assignment made on day one to carry forward");
-
-  const scheduleTwo = await fetch(`${baseUrl}/api/schedules?date=2031-03-02`)
-    .then(json<{ tasks: BuildingTask[] }>);
-  const carriedTask = scheduleTwo.tasks.find(
-    t => t.building_id === task.building_id && t.task_type_id === task.task_type_id,
-  );
-  assert.ok(carriedTask, "expected the same building+task_type to exist in day two's schedule");
-  assert.equal(carriedTask!.assigned_to, custodian!.id, "carried-forward task should keep the same custodian");
-  assert.equal(carriedTask!.status, "assigned");
+  const waltTask = philSchedule!.tasks.find(t => t.building_id === walt!.id);
+  assert.ok(waltTask, "expected WALT to be assigned to Phil");
+  assert.equal(waltTask!.estimated_hours, walt!.daily_hours_l2);
 });
 
 test("generate refuses to overwrite an existing schedule unless force is set", async () => {
@@ -136,4 +120,30 @@ test("generate prunes schedule-dated rows older than the retention window", asyn
   const after_ = await db.get<{ n: number }>(
     "SELECT count(*) as n FROM disruptions WHERE description = 'ancient'");
   assert.equal(Number(after_!.n), 0, "disruption older than the retention window should have been pruned");
+});
+
+test("assign/unassign still work against standing-assignment-generated tasks", async () => {
+  await fetch(`${baseUrl}/api/schedules/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date: "2031-04-05", force: true }),
+  });
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=2031-04-05`).then(json<DailySchedule>);
+  const someTask = schedule.tasks.find((t: BuildingTask) => t.assigned_to);
+  assert.ok(someTask, "expected at least one generated task to reassign");
+
+  const otherCustodian = await db.get<{ id: number }>(
+    "SELECT id FROM custodians WHERE active = 1 AND id != ? LIMIT 1", [someTask!.assigned_to!]);
+  assert.ok(otherCustodian);
+
+  const assignRes = await fetch(`${baseUrl}/api/schedules/assign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: someTask!.id, custodian_id: otherCustodian!.id }),
+  }).then(json<{ ok: boolean }>);
+  assert.equal(assignRes.ok, true);
+
+  const after_ = await db.get<{ assigned_to: number }>(
+    "SELECT assigned_to FROM building_tasks WHERE id = ?", [someTask!.id]);
+  assert.equal(after_!.assigned_to, otherCustodian!.id);
 });

@@ -270,6 +270,32 @@ select:focus, input:focus { border-color: var(--gold); }
 .task-type     { color: var(--text-muted); font-size: 11px; }
 .task-hours    { font-family: var(--font-mono); font-size: 11px; color: var(--gold); }
 
+/* Daily schedule: standing assignments (left) + coverage gaps (right) */
+.schedule-columns {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 20px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .schedule-columns { grid-template-columns: 1fr; }
+}
+.column-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+}
+.custodian-hours.near-limit { color: var(--yellow); }
+.custodian-hours.at-limit   { color: var(--red); font-weight: 700; }
+
+.gap-card { border-left: 3px solid var(--red); }
+.gap-building { font-weight: 600; font-size: 14px; }
+.gap-hours { font-family: var(--font-mono); color: var(--red); font-weight: 600; }
+.gap-reason { font-size: 11px; color: var(--text-muted); margin-top: 8px; }
+
 /* Coverage bar */
 .coverage-bar-wrap { display: flex; align-items: center; gap: 10px; }
 .coverage-bar {
@@ -299,6 +325,31 @@ select:focus, input:focus { border-color: var(--gold); }
 .alert-warn { background: rgba(243,156,18,0.1);  border: 1px solid rgba(243,156,18,0.3); color: var(--yellow); }
 .alert-err  { background: rgba(231,76,60,0.1);   border: 1px solid rgba(231,76,60,0.3);  color: var(--red); }
 .alert-info { background: rgba(52,152,219,0.1);  border: 1px solid rgba(52,152,219,0.3); color: var(--blue); }
+
+/* Assignments page: per-custodian coverage chips */
+.coverage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--gold);
+  border-radius: 4px;
+  padding: 4px 6px 4px 10px;
+  margin: 3px 6px 3px 0;
+  font-size: 12px;
+}
+.coverage-chip-secondary { border-left-color: var(--blue); }
+.coverage-chip-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+.coverage-chip-remove:hover { color: var(--red); opacity: 1; }
 
 /* Table */
 table { width: 100%; border-collapse: collapse; }
