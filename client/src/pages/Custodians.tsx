@@ -7,16 +7,26 @@ const SHIFTS = [
   { id: 1, label: "4am Shift" },
   { id: 2, label: "5am Shift" },
   { id: 3, label: "6am Shift" },
+  { id: 4, label: "2pm Shift" },
+  { id: 5, label: "3pm Shift" },
 ];
+
+// Same UTC-based "today" as ScheduleBoard.tsx, so a callout toggled here
+// lands on the same date the Schedule Board regenerates by default.
+const today = () => new Date().toISOString().slice(0, 10);
 
 export default function Custodians() {
   const [custodians, setCustodians] = useState<Custodian[]>([]);
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<CustodianCreateRequest>({ name: "", shift_template_id: 1 });
   const [hoveredShift, setHoveredShift] = useState<string | null>(null);
+  // Set after any Out/In toggle - the day's schedule was generated against
+  // the old roster and stays stale until regenerated.
+  const [scheduleStale, setScheduleStale] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
 
   async function load() {
-    setCustodians(await api.getCustodians());
+    setCustodians(await api.getCustodians(today()));
   }
 
   useEffect(() => { load(); }, []);
@@ -32,6 +42,29 @@ export default function Custodians() {
     if (!confirm("Remove this custodian?")) return;
     await api.deactivateCustodian(id);
     load();
+  }
+
+  async function toggleOut(c: Custodian) {
+    if (c.callout_id) {
+      await api.deleteCustodianStatus(c.id, c.callout_id);
+    } else {
+      const d = today();
+      await api.setCustodianStatus(c.id, { status: "callout", effective_date: d, end_date: d });
+    }
+    setScheduleStale(true);
+    load();
+  }
+
+  async function regenerateToday() {
+    const d = today();
+    if (!confirm(`Regenerate the schedule for ${d}? This replaces all current assignments for that day.`)) return;
+    setRegenerating(true);
+    try {
+      await api.generateSchedule(d, true);
+      setScheduleStale(false);
+    } finally {
+      setRegenerating(false);
+    }
   }
 
   function handleDragStart(e: React.DragEvent, custodianId: number) {
@@ -58,17 +91,36 @@ export default function Custodians() {
     members: custodians.filter(c => c.shift_template_id === s.id),
   }));
 
+  const outCount = custodians.filter(c => c.callout_id).length;
+
   return (
     <>
       <div className="page-header">
         <div>
           <div className="page-title">Custodians</div>
-          <div className="page-subtitle">{custodians.length} active staff</div>
+          <div className="page-subtitle">
+            {custodians.length} active staff
+            {outCount > 0 && <> &middot; <span style={{ color: "var(--red)" }}>{outCount} out today</span></>}
+          </div>
         </div>
         <button className="btn-primary" onClick={() => setAdding(!adding)}>
           {adding ? "Cancel" : "+ Add Custodian"}
         </button>
       </div>
+
+      {scheduleStale && (
+        <div className="card flex gap-12 items-center" style={{ borderLeft: "3px solid var(--yellow)" }}>
+          <span style={{ flex: 1, fontSize: 13 }}>
+            Today's roster changed. Regenerate today's schedule to pick it up.
+          </span>
+          <button className="btn-secondary" onClick={() => setScheduleStale(false)} disabled={regenerating}>
+            Dismiss
+          </button>
+          <button className="btn-primary" onClick={regenerateToday} disabled={regenerating}>
+            {regenerating ? "Regenerating…" : "Regenerate Today"}
+          </button>
+        </div>
+      )}
 
       {adding && (
         <div className="card flex gap-12 items-center">
@@ -134,6 +186,7 @@ export default function Custodians() {
                       <th>Name</th>
                       <th>Shift</th>
                       <th>Productive Hours</th>
+                      <th>Today</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -148,6 +201,16 @@ export default function Custodians() {
                         <td style={{ fontWeight: 500 }}>{c.name}</td>
                         <td className="text-mono" style={{ color: "var(--gold)" }}>{c.start_time}</td>
                         <td className="text-mono">{((c.productive_min || 450) / 60).toFixed(1)} hrs</td>
+                        <td>
+                          <button
+                            className={`badge ${c.callout_id ? "badge-red" : "badge-green"}`}
+                            style={{ border: "none", cursor: "pointer" }}
+                            title={c.callout_id ? "Called out today - click to mark in" : "Click to mark out for today"}
+                            onClick={() => toggleOut(c)}
+                          >
+                            {c.callout_id ? "Out" : "In"}
+                          </button>
+                        </td>
                         <td style={{ textAlign: "right" }}>
                           <button
                             className="btn-ghost"

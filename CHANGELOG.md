@@ -53,6 +53,12 @@
   test suite (every test file gets its own db path, one process spawns
   another to do a write it will later need to delete). Not something this
   app's own code can fix - it's inside the client library.
+- "Today" on the client is `new Date().toISOString().slice(0, 10)` (UTC)
+  in both `ScheduleBoard.tsx` and `Custodians.tsx`. After 4pm/5pm Pacific
+  that is already tomorrow's date, so a callout toggled late in the day
+  lands on the next day. Harmless for the intended early-morning use
+  (4-6am shifts); `Custodians.tsx` deliberately matches ScheduleBoard's
+  definition so both pages agree. Not fixed.
 
 ---
 
@@ -619,3 +625,64 @@ than silently patched:
   just says "Whiteboard: FMLA, no dates given."
 These would need the user's confirmation before changing seed data, same
 as the original roster/building-name assumptions earlier in this file.
+
+---
+
+## 2026-11-12
+
+### Custodians page: one-day Out/In switch
+
+First of two parts for callout handling (the second, a coverage pool
+that picks up a called-out custodian's trash and restrooms, is a
+separate change). Uses the existing `custodian_status` table and the
+existing "callout" status value - no schema change.
+
+- `server/routes/custodians.ts`: `GET /` takes an optional `?date=`
+  (default today) and returns `callout_id`, the id of the custodian's
+  one-day callout row for that date (`effective_date = end_date = date`),
+  or null. Multi-day fmla/vacation windows are not reflected in it.
+- `server/routes/custodians.ts`: new `DELETE /:id/status/:statusId`
+  (scoped to that custodian). Marking someone back "in" deletes the
+  callout row rather than inserting an `active` row: status resolution
+  sorts by `effective_date` only, so a same-day `active` row and
+  `callout` row tie and either could win.
+- `client/src/pages/Custodians.tsx`: new "Today" column with an In/Out
+  badge-button per row, and an "N out today" count in the page subtitle.
+  Any toggle shows a "Regenerate Today" banner, which calls the existing
+  `POST /api/schedules/generate` with `force: true` (same confirm prompt
+  as the Schedule Board). Regenerate still wipes that day's manual drag
+  reassignments - existing behavior, unchanged.
+- `client/src/api.ts`: `getCustodians(date?)`, new `deleteCustodianStatus`.
+- `shared/types.ts`: optional `callout_id` on `Custodian`.
+- Verified against a copy of the live db via the API: Olga out on a
+  Monday -> regenerate drops her tasks (29 -> 27) and reports Weyerhaeuser
+  Hall as a coverage gap; back in -> regenerate restores 29 tasks, 0 gaps.
+  Typecheck and existing test suite pass. The page itself was not checked
+  in a browser.
+- Deferred: multi-day callouts (one day only, per user), no dedicated
+  test file for the new routes.
+
+---
+
+## 2026-11-13
+
+### 2pm and 3pm night crew shifts
+
+- New `seeds/011_night_shifts.sql`: `shift_templates` rows 4 (`2pm Shift`,
+  `14:00`) and 5 (`3pm Shift`, `15:00`). Productive minutes and break
+  structure come from the table's column defaults (450 productive min,
+  8.5-hr span), same as the morning shifts. 24-hour `start_time` keeps
+  `ORDER BY s.start_time` placing night shifts after morning ones.
+  Idempotent via explicit ids (re-run hits UNIQUE, skipped by init-db).
+- `client/src/pages/Custodians.tsx`: added both to the hardcoded `SHIFTS`
+  list, so they appear as drag targets and in the Add Custodian dropdown.
+  The list is still hardcoded rather than fetched from the db - fine at
+  5 shifts; a new shift still needs both a seed row and a list entry.
+- Not changed: `ScheduleBoard.tsx`'s near/at-limit hour warnings and
+  schedule generation don't look at shift start time, so night crew is
+  scheduled exactly like morning crew. The planned coverage-pool seed
+  moves to `012`.
+- Verified on a copy of the live db: init-db applies 011 once and skips
+  it on re-run; dragging Amos to the 2pm shift (PATCH) returns
+  `2pm Shift / 14:00 / 450` and sorts him last. Typecheck and tests pass.
+  Run `npm run db:init` to add the shifts to an existing db.
