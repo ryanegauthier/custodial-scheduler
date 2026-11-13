@@ -745,3 +745,22 @@ nobody goes past their 7.5-hr productive shift.
 - Deferred: a "covering for X" label on the Schedule Board (the task rows
   show as Restrooms/Trash under the coverer, but not whose building it
   is); splitting a bundle across two people when no one person has room.
+
+### Custodians page: auto-scroll while dragging
+
+Reported: dragging a custodian disables the mouse wheel, so a shift card
+off-screen can't be reached. That is browser behavior, not an app bug -
+Chrome/Edge on Windows don't scroll on wheel input during a native HTML5
+drag, and the app can't re-enable it (no wheel events are dispatched).
+
+- `client/src/pages/Custodians.tsx`: on drag start, a document-level
+  `dragover` listener records the pointer's Y position, and a
+  `requestAnimationFrame` loop scrolls `.main-content` (the actual scroll
+  container - `.app-layout` is `overflow: hidden`) when the pointer is
+  within 80px of its top or bottom edge, up to 18px/frame, scaled by
+  closeness to the edge. Stops on `dragend`/`drop` (document-level, so
+  drops outside a shift card and Esc-cancels also stop it) and on unmount.
+- Not verified in a browser: native drag-and-drop can't be driven from
+  the tools available here. Typecheck passes. Needs a manual check: drag
+  a custodian toward the bottom edge of the page and confirm it scrolls,
+  then drop and confirm scrolling stops.

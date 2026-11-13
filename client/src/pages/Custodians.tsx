@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../api";
 import type { Custodian } from "@shared/types";
 import type { CustodianCreateRequest } from "@shared/schemas";
@@ -15,6 +15,13 @@ const SHIFTS = [
 // lands on the same date the Schedule Board regenerates by default.
 const today = () => new Date().toISOString().slice(0, 10);
 
+// Browsers (Chrome/Edge on Windows especially) ignore the mouse wheel
+// during a native HTML5 drag, so a long roster can't be scrolled to reach
+// a far shift. Instead, dragging within EDGE_PX of the scroll container's
+// top/bottom edge auto-scrolls it, faster the closer to the edge.
+const EDGE_PX = 80;
+const MAX_SCROLL_PX_PER_FRAME = 18;
+
 export default function Custodians() {
   const [custodians, setCustodians] = useState<Custodian[]>([]);
   const [adding, setAdding] = useState(false);
@@ -24,6 +31,10 @@ export default function Custodians() {
   // the old roster and stays stale until regenerated.
   const [scheduleStale, setScheduleStale] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  // Edge auto-scroll state for the current drag, if one is in progress.
+  const autoScroll = useRef<{ stop: () => void } | null>(null);
+
+  useEffect(() => () => autoScroll.current?.stop(), []);
 
   async function load() {
     setCustodians(await api.getCustodians(today()));
@@ -77,6 +88,48 @@ export default function Custodians() {
   function handleDragStart(e: React.DragEvent, custodianId: number) {
     e.dataTransfer.setData("text/plain", String(custodianId));
     e.dataTransfer.effectAllowed = "move";
+    startAutoScroll(e.currentTarget.closest(".main-content"));
+  }
+
+  function startAutoScroll(scroller: Element | null) {
+    autoScroll.current?.stop();
+    if (!scroller) return;
+    let pointerY: number | null = null;
+    let frame = 0;
+
+    // dragover keeps firing on the document while the pointer is held
+    // still, but not often enough for smooth scrolling - it only records
+    // the position, and the animation frame loop does the scrolling.
+    const onDragOver = (ev: DragEvent) => { pointerY = ev.clientY; };
+    const tick = () => {
+      if (pointerY !== null) {
+        const { top, bottom } = scroller.getBoundingClientRect();
+        const fromTop = pointerY - top;
+        const fromBottom = bottom - pointerY;
+        if (fromTop < EDGE_PX) {
+          scroller.scrollTop -= MAX_SCROLL_PX_PER_FRAME * (1 - Math.max(fromTop, 0) / EDGE_PX);
+        } else if (fromBottom < EDGE_PX) {
+          scroller.scrollTop += MAX_SCROLL_PX_PER_FRAME * (1 - Math.max(fromBottom, 0) / EDGE_PX);
+        }
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    const stop = () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("dragover", onDragOver);
+      document.removeEventListener("dragend", stop);
+      document.removeEventListener("drop", stop);
+      autoScroll.current = null;
+    };
+
+    document.addEventListener("dragover", onDragOver);
+    // dragend fires on the source row even when dropped outside a shift
+    // card or cancelled with Esc; drop covers the source row having been
+    // re-rendered away by load() before dragend reaches the document.
+    document.addEventListener("dragend", stop);
+    document.addEventListener("drop", stop);
+    frame = requestAnimationFrame(tick);
+    autoScroll.current = { stop };
   }
 
   function handleDragOver(e: React.DragEvent, shiftKey: string) {
