@@ -44,6 +44,7 @@ export const custodianUpdateRequestSchema = z.object({
   shift_template_id: z.number().nullable().optional(),
   active: z.number().optional(),
   notes: z.string().nullable().optional(),
+  coverage_approved: z.union([z.literal(0), z.literal(1)]).optional(),
 });
 export type CustodianUpdateRequest = z.infer<typeof custodianUpdateRequestSchema>;
 

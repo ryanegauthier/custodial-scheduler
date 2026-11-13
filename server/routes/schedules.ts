@@ -24,6 +24,23 @@ const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
 // task type.
 const STANDING_ASSIGNMENT_TASK_TYPE = 6;
 
+// When nobody on a building's standing assignment is available, a
+// coverage-pool custodian picks up only restrooms and trash (floors and
+// vacuuming are skipped for the day). Shares are fractions of the
+// building's daily hours: 43% total per user (2026-11-13), split in the
+// same 30:15:12 proportions the old APPA-ratio algorithm used for these
+// three task types (task_types ids 2-4).
+const COVERAGE_TASK_SHARES: { taskTypeId: number; share: number }[] = [
+  { taskTypeId: 2, share: 0.226 }, // Restrooms
+  { taskTypeId: 3, share: 0.113 }, // Trash (Classrooms)
+  { taskTypeId: 4, share: 0.091 }, // Trash (Common)
+];
+const COVERAGE_TASK_TYPE_IDS = COVERAGE_TASK_SHARES.map(s => s.taskTypeId);
+
+// Fallback when a custodian has no shift template (productive_min null),
+// matching shift_templates.productive_min's column default.
+const DEFAULT_PRODUCTIVE_MIN = 450;
+
 function dayOfWeek(date: string): string {
   return DAY_NAMES[new Date(`${date}T00:00:00`).getDay()];
 }
@@ -118,8 +135,20 @@ async function getAssignmentsForDate(date: string) {
 
 // A building is a coverage gap when every standing assignment covering it
 // today belongs to an unavailable custodian - a secondary assignee who is
-// still active covers the primary's absence, so no gap is reported.
+// still active covers the primary's absence, so no gap is reported. A
+// building whose restroom/trash coverage tasks are assigned to someone
+// for that date is no longer a gap; unassigning them (Schedule Board)
+// makes it one again.
 async function buildCoverageGaps(date: string): Promise<CoverageGap[]> {
+  const covered = new Set((await db.all<{ building_id: number }>(
+    `SELECT DISTINCT building_id FROM building_tasks
+     WHERE schedule_date = ? AND assigned_to IS NOT NULL
+       AND task_type_id IN (${COVERAGE_TASK_TYPE_IDS.join(",")})`,
+    [date])).map(r => r.building_id));
+  return (await buildUncoveredBuildings(date)).filter(g => !covered.has(g.building_id));
+}
+
+async function buildUncoveredBuildings(date: string): Promise<CoverageGap[]> {
   const { assignments, unavailable } = await getAssignmentsForDate(date);
 
   const byBuilding = new Map<number, AssignmentRow[]>();
@@ -233,14 +262,56 @@ router.post("/generate", async (req, res) => {
       .map(a => a.building_id));
 
   let tasksCreated = 0;
+  const hoursByCustodian = new Map<number, number>();
   for (const a of assignments) {
     if (unavailable.has(a.custodian_id)) continue;
     if (a.assignment_type === "secondary" && availablePrimaryBuildings.has(a.building_id)) continue;
+    const hours = hoursAtTargetLevel(a).hours ?? 0;
     await db.run(`INSERT INTO building_tasks
       (building_id, task_type_id, estimated_hours, schedule_date, status, assigned_to)
       VALUES (?, ?, ?, ?, 'assigned', ?)`,
-      [a.building_id, STANDING_ASSIGNMENT_TASK_TYPE, hoursAtTargetLevel(a).hours ?? 0, date, a.custodian_id]);
+      [a.building_id, STANDING_ASSIGNMENT_TASK_TYPE, hours, date, a.custodian_id]);
+    hoursByCustodian.set(a.custodian_id, (hoursByCustodian.get(a.custodian_id) ?? 0) + hours);
     tasksCreated++;
+  }
+
+  // Coverage: each uncovered building (largest first) gets its restroom
+  // and trash share as one bundle, given to the available coverage-
+  // approved custodian with the most room left under their shift's
+  // productive hours (own standing hours count against it). A bundle
+  // nobody has room for is left as a coverage gap - not split across
+  // people, not assigned over the limit.
+  const pool = (await db.all<{ id: number; productive_min: number | null }>(
+    `SELECT c.id, s.productive_min FROM custodians c
+     LEFT JOIN shift_templates s ON s.id = c.shift_template_id
+     WHERE c.active = 1 AND c.coverage_approved = 1`))
+    .filter(p => !unavailable.has(p.id));
+
+  const coverageAssigned: { building_id: number; custodian_id: number; hours: number }[] = [];
+  for (const gap of await buildUncoveredBuildings(date)) {
+    const bundle = COVERAGE_TASK_SHARES.map(s => ({
+      taskTypeId: s.taskTypeId,
+      hours: +((gap.daily_hours ?? 0) * s.share).toFixed(3),
+    }));
+    const bundleHours = bundle.reduce((sum, t) => sum + t.hours, 0);
+    if (bundleHours <= 0) continue;
+
+    let best: { id: number; room: number } | null = null;
+    for (const p of pool) {
+      const room = (p.productive_min ?? DEFAULT_PRODUCTIVE_MIN) / 60 - (hoursByCustodian.get(p.id) ?? 0);
+      if (room >= bundleHours && (!best || room > best.room)) best = { id: p.id, room };
+    }
+    if (!best) continue;
+
+    for (const t of bundle) {
+      await db.run(`INSERT INTO building_tasks
+        (building_id, task_type_id, estimated_hours, schedule_date, status, assigned_to)
+        VALUES (?, ?, ?, ?, 'assigned', ?)`,
+        [gap.building_id, t.taskTypeId, t.hours, date, best.id]);
+      tasksCreated++;
+    }
+    hoursByCustodian.set(best.id, (hoursByCustodian.get(best.id) ?? 0) + bundleHours);
+    coverageAssigned.push({ building_id: gap.building_id, custodian_id: best.id, hours: +bundleHours.toFixed(3) });
   }
 
   res.json({
@@ -248,6 +319,7 @@ router.post("/generate", async (req, res) => {
     date,
     day_of_week: dayOfWeek(date),
     tasks_created: tasksCreated,
+    coverage_assigned: coverageAssigned,
     coverage_gaps: await buildCoverageGaps(date),
   });
 });

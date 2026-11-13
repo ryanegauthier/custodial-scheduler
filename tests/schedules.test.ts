@@ -147,3 +147,84 @@ test("assign/unassign still work against standing-assignment-generated tasks", a
     "SELECT assigned_to FROM building_tasks WHERE id = ?", [someTask!.id]);
   assert.equal(after_!.assigned_to, otherCustodian!.id);
 });
+
+// --- Coverage pool (seeds/012_coverage_pool.sql) ---
+// WALT's only standing assignee is Phil, so calling him out leaves it
+// uncovered. (Weyerhaeuser Hall would not work: Bobbiann is its secondary.)
+
+async function generate(date: string) {
+  return fetch(`${baseUrl}/api/schedules/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date, force: true }),
+  }).then(json<{ coverage_assigned: { building_id: number; custodian_id: number }[] }>);
+}
+
+async function callOut(name: string, date: string) {
+  await db.run(
+    `INSERT INTO custodian_status (custodian_id, status, effective_date, end_date)
+     SELECT id, 'callout', ?, ? FROM custodians WHERE name = ?`, [date, date, name]);
+}
+
+async function walt() {
+  return (await db.get<{ id: number; hours: number }>(
+    `SELECT id, CASE COALESCE(target_appa_level, 2) WHEN 1 THEN daily_hours_l1
+       WHEN 3 THEN daily_hours_l3 ELSE daily_hours_l2 END as hours
+     FROM buildings WHERE name = 'WALT'`))!;
+}
+
+test("a called-out custodian's building gets only restroom/trash coverage (43%) from an approved custodian", async () => {
+  const date = "2031-04-07";
+  await callOut("Phil", date);
+  const w = await walt();
+  await generate(date);
+
+  const tasks = await db.all<{ task_type_id: number; estimated_hours: number; assigned_to: number }>(
+    "SELECT task_type_id, estimated_hours, assigned_to FROM building_tasks WHERE schedule_date = ? AND building_id = ?",
+    [date, w.id]);
+  assert.deepEqual(tasks.map(t => t.task_type_id).sort(), [2, 3, 4], "expected Restrooms + both Trash types only");
+  assert.equal(new Set(tasks.map(t => t.assigned_to)).size, 1, "bundle should go to one person");
+  const total = tasks.reduce((s, t) => s + t.estimated_hours, 0);
+  assert.ok(Math.abs(total - w.hours * 0.43) < 0.01, `expected ~43% of ${w.hours}, got ${total}`);
+
+  const coverer = await db.get<{ coverage_approved: number }>(
+    "SELECT coverage_approved FROM custodians WHERE id = ?", [tasks[0].assigned_to]);
+  assert.equal(coverer!.coverage_approved, 1);
+
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+  assert.ok(!schedule.coverage_gaps.some(g => g.building_id === w.id), "covered building should not be a gap");
+});
+
+test("coverage never pushes anyone past their shift's productive hours", async () => {
+  const date = "2031-04-14";
+  // Call out everyone with a standing assignment, so the pool is
+  // oversubscribed.
+  await db.run(
+    `INSERT INTO custodian_status (custodian_id, status, effective_date, end_date)
+     SELECT DISTINCT custodian_id, 'callout', ?, ? FROM custodian_assignments`, [date, date]);
+  const result = await generate(date);
+  assert.ok(result.coverage_assigned.length > 0, "expected some coverage to be assigned");
+
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+  for (const c of schedule.custodians) {
+    const limit = (c.productive_min ?? 450) / 60;
+    assert.ok(c.assigned_hours <= limit + 1e-9, `${c.name} has ${c.assigned_hours}h, limit ${limit}h`);
+  }
+  assert.ok(schedule.coverage_gaps.length > 0, "an oversubscribed pool should leave some gaps");
+});
+
+test("with nobody approved for coverage, the building stays a gap", async () => {
+  const date = "2031-04-21";
+  const approved = await db.all<{ id: number }>("SELECT id FROM custodians WHERE coverage_approved = 1");
+  await db.run("UPDATE custodians SET coverage_approved = 0");
+  try {
+    await callOut("Phil", date);
+    const w = await walt();
+    const result = await generate(date);
+    assert.equal(result.coverage_assigned.length, 0);
+    const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+    assert.ok(schedule.coverage_gaps.some(g => g.building_id === w.id));
+  } finally {
+    for (const a of approved) await db.run("UPDATE custodians SET coverage_approved = 1 WHERE id = ?", [a.id]);
+  }
+});

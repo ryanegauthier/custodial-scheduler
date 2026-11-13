@@ -103,31 +103,40 @@ test("a days_of_week-restricted assignment only generates a task on its own days
 });
 
 test("a callout on a building's only assignee produces a coverage gap", async () => {
-  const phil = await db.get<{ id: number }>("SELECT id FROM custodians WHERE name = 'Phil'");
-  const walt = await db.get<{ id: number; daily_hours_l2: number }>(
-    "SELECT id, daily_hours_l2 FROM buildings WHERE name = 'WALT'");
-  assert.ok(phil && walt, "expected Phil and WALT (Phil's sole standing assignment there) in seed data");
+  // With an empty coverage pool - otherwise an approved custodian picks
+  // up WALT's restrooms/trash and it is no longer a gap (covered in
+  // tests/schedules.test.ts). Approvals are restored at the end.
+  const approved = await db.all<{ id: number }>("SELECT id FROM custodians WHERE coverage_approved = 1");
+  await db.run("UPDATE custodians SET coverage_approved = 0");
+  try {
+    const phil = await db.get<{ id: number }>("SELECT id FROM custodians WHERE name = 'Phil'");
+    const walt = await db.get<{ id: number; daily_hours_l2: number }>(
+      "SELECT id, daily_hours_l2 FROM buildings WHERE name = 'WALT'");
+    assert.ok(phil && walt, "expected Phil and WALT (Phil's sole standing assignment there) in seed data");
 
-  const date = "2031-05-10";
-  await fetch(`${baseUrl}/api/custodians/${phil!.id}/status`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status: "callout", effective_date: date, end_date: date }),
-  });
+    const date = "2031-05-10";
+    await fetch(`${baseUrl}/api/custodians/${phil!.id}/status`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "callout", effective_date: date, end_date: date }),
+    });
 
-  await fetch(`${baseUrl}/api/schedules/generate`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ date, force: true }),
-  });
+    await fetch(`${baseUrl}/api/schedules/generate`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ date, force: true }),
+    });
 
-  const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
-  const gap = schedule.coverage_gaps.find(g => g.building_id === walt!.id);
-  assert.ok(gap, "expected WALT to show up as a coverage gap while Phil is called out");
-  assert.equal(gap!.daily_hours, walt!.daily_hours_l2);
-  assert.ok(gap!.unavailable.some(u => u.custodian_id === phil!.id && u.status === "callout"));
+    const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+    const gap = schedule.coverage_gaps.find(g => g.building_id === walt!.id);
+    assert.ok(gap, "expected WALT to show up as a coverage gap while Phil is called out");
+    assert.equal(gap!.daily_hours, walt!.daily_hours_l2);
+    assert.ok(gap!.unavailable.some(u => u.custodian_id === phil!.id && u.status === "callout"));
 
-  const philSchedule = schedule.custodians.find(c => c.id === phil!.id);
-  assert.ok(!philSchedule?.tasks.some(t => t.building_id === walt!.id),
-    "Phil should not have a WALT task while called out");
+    const philSchedule = schedule.custodians.find(c => c.id === phil!.id);
+    assert.ok(!philSchedule?.tasks.some(t => t.building_id === walt!.id),
+      "Phil should not have a WALT task while called out");
+  } finally {
+    for (const a of approved) await db.run("UPDATE custodians SET coverage_approved = 1 WHERE id = ?", [a.id]);
+  }
 });
 
 test("a secondary assignee covers the primary's absence - no gap, and the secondary gets the task", async () => {

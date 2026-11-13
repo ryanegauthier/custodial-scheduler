@@ -44,6 +44,13 @@ export default function Custodians() {
     load();
   }
 
+  // Approval only affects future generate runs, so unlike toggleOut this
+  // doesn't mark today's schedule stale.
+  async function toggleCoverage(c: Custodian) {
+    await api.updateCustodian(c.id, { coverage_approved: c.coverage_approved ? 0 : 1 });
+    load();
+  }
+
   async function toggleOut(c: Custodian) {
     if (c.callout_id) {
       await api.deleteCustodianStatus(c.id, c.callout_id);
@@ -92,6 +99,7 @@ export default function Custodians() {
   }));
 
   const outCount = custodians.filter(c => c.callout_id).length;
+  const coverageCount = custodians.filter(c => c.coverage_approved).length;
 
   return (
     <>
@@ -101,6 +109,7 @@ export default function Custodians() {
           <div className="page-subtitle">
             {custodians.length} active staff
             {outCount > 0 && <> &middot; <span style={{ color: "var(--red)" }}>{outCount} out today</span></>}
+            {" "}&middot; {coverageCount} approved for coverage
           </div>
         </div>
         <button className="btn-primary" onClick={() => setAdding(!adding)}>
@@ -187,6 +196,7 @@ export default function Custodians() {
                       <th>Shift</th>
                       <th>Productive Hours</th>
                       <th>Today</th>
+                      <th>Coverage</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -209,6 +219,18 @@ export default function Custodians() {
                             onClick={() => toggleOut(c)}
                           >
                             {c.callout_id ? "Out" : "In"}
+                          </button>
+                        </td>
+                        <td>
+                          <button
+                            className={c.coverage_approved ? "badge badge-blue" : "badge"}
+                            style={{ border: "none", cursor: "pointer", opacity: c.coverage_approved ? 1 : 0.5 }}
+                            title={c.coverage_approved
+                              ? "Approved to cover called-out custodians' restrooms and trash - click to remove"
+                              : "Click to approve for coverage"}
+                            onClick={() => toggleCoverage(c)}
+                          >
+                            {c.coverage_approved ? "Approved" : "No"}
                           </button>
                         </td>
                         <td style={{ textAlign: "right" }}>

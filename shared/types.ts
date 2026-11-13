@@ -70,9 +70,12 @@ export interface Custodian {
   team_id: number | null;
   active: number;
   notes: string | null;
+  coverage_approved: number;
   shift_name?: string | null;
   start_time?: string | null;
   productive_min?: number | null;
+  // Only populated by GET /api/custodians: today's one-day callout row id.
+  callout_id?: number | null;
 }
 
 export interface Team {

@@ -59,6 +59,16 @@
   lands on the next day. Harmless for the intended early-morning use
   (4-6am shifts); `Custodians.tsx` deliberately matches ScheduleBoard's
   definition so both pages agree. Not fixed.
+- `seeds/012_coverage_pool.sql`'s initial-pool UPDATE is guarded by "nobody
+  is approved yet" so `npm run db:init` re-runs don't re-approve people a
+  manager un-flagged. If a manager un-flags *everyone*, the next db:init
+  re-seeds the pool (every active custodian with no standing assignment).
+  Not fixed - would need a one-time-migration marker, not worth it yet.
+- Coverage tasks are recognized by `task_type_id` 2-4 (Restrooms, Trash x2).
+  Those ids were also used by the pre-2026-10-07 APPA-ratio algorithm, so
+  `GET /api/schedules` for a date generated under it would treat its
+  assigned restroom/trash rows as "coverage" and hide that day's gaps.
+  Retention pruning (30 days) means no such dates remain in practice.
 
 ---
 
@@ -686,3 +696,52 @@ existing "callout" status value - no schema change.
   it on re-run; dragging Amos to the 2pm shift (PATCH) returns
   `2pm Shift / 14:00 / 450` and sorts him last. Typecheck and tests pass.
   Run `npm run db:init` to add the shifts to an existing db.
+
+### Coverage pool: approved custodians pick up a callout's restrooms and trash
+
+Second half of callout handling (first half: the Out/In switch,
+2026-11-12). Per user: initial pool is everyone currently unassigned, with
+a per-person approval flag; coverage is restrooms and trash only (floors
+and vacuuming skipped), estimated at 43% of the building's daily hours;
+nobody goes past their 7.5-hr productive shift.
+
+- New `seeds/012_coverage_pool.sql`: `custodians.coverage_approved INTEGER
+  NOT NULL DEFAULT 0`, then a guarded one-time UPDATE approving every
+  active custodian with no `custodian_assignments` row. On the live db
+  that is Carlie, Isaiah, Oksana, Amos, Bobbiann, Hope (Hope is on FMLA, so
+  she is skipped by generation while unavailable).
+- `server/routes/schedules.ts` `POST /generate`: after standing-assignment
+  tasks, each uncovered building (largest hours first) gets a bundle of
+  three tasks - Restrooms 22.6%, Trash (Classrooms) 11.3%, Trash (Common)
+  9.1% of its target-level daily hours (43% total, the old APPA algorithm's
+  30:15:12 proportions scaled down). The bundle goes to the available
+  approved custodian with the most room left under their shift's
+  `productive_min` (default 450), counting their own standing hours. If
+  nobody has room, the building stays a gap: bundles are never split
+  across people or assigned over the limit. Response gains
+  `coverage_assigned` (`building_id`, `custodian_id`, `hours`).
+- `buildCoverageGaps` now excludes buildings with an *assigned*
+  restroom/trash task for that date; the old logic moved unchanged into
+  `buildUncoveredBuildings`, which generate uses to find what needs
+  covering. Unassigning a coverage task on the Schedule Board makes the
+  building a gap again.
+- `server/routes/custodians.ts` PATCH, `shared/schemas.ts`: accept
+  `coverage_approved` (0/1). `shared/types.ts`: `Custodian.coverage_approved`.
+- `client/src/pages/Custodians.tsx`: "Coverage" column with an
+  Approved/No toggle per row, plus an "N approved for coverage" count in
+  the subtitle. Toggling it does not show the stale-schedule banner;
+  approval only matters on the next generate.
+- Tests (`tests/schedules.test.ts`): Phil out -> WALT gets exactly task
+  types 2/3/4, one assignee, ~43% of hours, assignee approved, not listed
+  as a gap; everyone with a standing assignment out -> no custodian over
+  their productive hours and some gaps remain; nobody approved -> WALT
+  stays a gap. `tests/schedules-team-fallback.test.ts`'s "callout produces
+  a coverage gap" test now empties the pool for its duration (its premise
+  only holds when nobody can cover); its assertions are unchanged.
+  14/14 pass, typecheck passes.
+- Verified on a copy of the live db: Olga out on a Monday -> Weyerhaeuser
+  Hall's 2.784h bundle went to Bobbiann, no gaps. The page itself was not
+  checked in a browser.
+- Deferred: a "covering for X" label on the Schedule Board (the task rows
+  show as Restrooms/Trash under the coverer, but not whose building it
+  is); splitting a bundle across two people when no one person has room.

@@ -47,7 +47,8 @@ export const api = {
     patchJSON<{ ok: true }>(`/api/buildings/${id}`, body),
   getZones: () => getJSON<ZoneWithBuildings[]>("/api/zones"),
 
-  getCustodians: () => getJSON<Custodian[]>("/api/custodians"),
+  getCustodians: (date?: string) =>
+    getJSON<Custodian[]>(`/api/custodians${date ? `?date=${date}` : ""}`),
   addCustodian: (body: CustodianCreateRequest) =>
     postJSON<{ id: number }>("/api/custodians", body),
   deactivateCustodian: (id: number) =>
@@ -74,6 +75,9 @@ export const api = {
     ),
   setCustodianStatus: (id: number, body: CustodianStatusCreateRequest) =>
     postJSON<{ id: number }>(`/api/custodians/${id}/status`, body),
+  deleteCustodianStatus: (id: number, statusId: number) =>
+    fetch(`/api/custodians/${id}/status/${statusId}`, { method: "DELETE" })
+      .then(r => r.json() as Promise<{ ok: true }>),
 
   aiRebalance: (date: string) => postJSON<AIRebalanceResult>("/api/ai/rebalance", { date }),
   aiSuggestZones: () => postJSON<AISuggestZonesResult>("/api/ai/suggest-zones", {}),
