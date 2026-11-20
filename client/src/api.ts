@@ -11,6 +11,7 @@ import type {
   AIRebalanceResult,
   AISuggestZonesResult,
   AssignmentCreateRequest,
+  AssignmentUpdateRequest,
   BuildingUpdateRequest,
   CustodianCreateRequest,
   CustodianStatusCreateRequest,
@@ -113,6 +114,8 @@ export const api = {
   getAssignments: () => getJSON<CustodianAssignment[]>("/api/assignments"),
   addAssignment: (body: AssignmentCreateRequest) =>
     postJSON<{ id: number }>("/api/assignments", body),
+  updateAssignment: (id: number, body: AssignmentUpdateRequest) =>
+    patchJSON<{ ok: true }>(`/api/assignments/${id}`, body),
   deleteAssignment: (id: number) => deleteJSON<{ ok: true }>(`/api/assignments/${id}`),
 
   getCustodianStatus: (id: number, date?: string) =>
@@ -121,6 +124,9 @@ export const api = {
     ),
   setCustodianStatus: (id: number, body: CustodianStatusCreateRequest) =>
     postJSON<{ id: number }>(`/api/custodians/${id}/status`, body),
+  // Ends every absence covering `date` (see POST /api/custodians/:id/back).
+  markCustodianBack: (id: number, date: string) =>
+    postJSON<{ ok: true; ended: number }>(`/api/custodians/${id}/back`, { date }),
   deleteCustodianStatus: (id: number, statusId: number) =>
     deleteJSON<{ ok: true }>(`/api/custodians/${id}/status/${statusId}`),
 

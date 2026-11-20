@@ -54,7 +54,13 @@ export const assignmentCreateRequestSchema = z.object({
   assignment_type: z.enum(["primary", "secondary"]).default("primary"),
   days_of_week: z.string().nullable().optional(),
   notes: z.string().nullable().optional(),
+  share_pct: z.number().int().min(1).max(100).default(100),
 });
+
+export const assignmentUpdateRequestSchema = z.object({
+  share_pct: z.number().int().min(1).max(100),
+});
+export type AssignmentUpdateRequest = z.infer<typeof assignmentUpdateRequestSchema>;
 export type AssignmentCreateRequest = z.infer<typeof assignmentCreateRequestSchema>;
 
 export const custodianStatusCreateRequestSchema = z.object({
@@ -62,7 +68,13 @@ export const custodianStatusCreateRequestSchema = z.object({
   effective_date: dateSchema.nullable().optional(),
   end_date: dateSchema.nullable().optional(),
   notes: z.string().nullable().optional(),
-});
+}).refine(
+  s => !s.effective_date || !s.end_date || s.end_date >= s.effective_date,
+  { message: "end_date must be on or after effective_date", path: ["end_date"] },
+);
+
+// "Back" from any absence in effect on `date` (see POST /:id/back).
+export const custodianBackRequestSchema = z.object({ date: dateSchema });
 export type CustodianStatusCreateRequest = z.infer<typeof custodianStatusCreateRequestSchema>;
 
 export const buildingUpdateRequestSchema = z.object({

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { api } from "../api";
-import type { Custodian } from "@shared/types";
+import type { Custodian, CustodianStatus } from "@shared/types";
 import type { CustodianCreateRequest } from "@shared/schemas";
 
 const SHIFTS = [
@@ -19,6 +19,35 @@ const today = () => new Date().toISOString().slice(0, 10);
 // during a native HTML5 drag, so a long roster can't be scrolled to reach
 // a far shift. Instead, dragging within EDGE_PX of the scroll container's
 // top/bottom edge auto-scrolls it, faster the closer to the edge.
+type AbsenceKind = "callout" | "vacation" | "fmla";
+const ABSENCE_LABEL: Record<AbsenceKind, string> = { callout: "Out", vacation: "Vacation", fmla: "FMLA" };
+
+// "2026-11-22" -> "Sun 11/22"
+function shortDate(d: string): string {
+  const dt = new Date(`${d}T00:00:00`);
+  return `${dt.toLocaleDateString(undefined, { weekday: "short" })} ${dt.getMonth() + 1}/${dt.getDate()}`;
+}
+
+// Badge text for an absence in effect on `date`: "Out" (just that day),
+// "Vacation thru Fri 11/22", or "FMLA" / "Out until back" when open-ended.
+function absenceLabel(st: CustodianStatus, date: string): string {
+  const kind = ABSENCE_LABEL[st.status as AbsenceKind] ?? st.status;
+  if (!st.end_date) return st.status === "callout" ? "Out until back" : kind;
+  if (st.end_date === date) return kind;
+  return `${kind} thru ${shortDate(st.end_date)}`;
+}
+
+// "Vacation Mon 12/1 - Fri 12/5", for an absence that hasn't started yet.
+function upcomingLabel(st: CustodianStatus): string {
+  const kind = ABSENCE_LABEL[st.status as AbsenceKind] ?? st.status;
+  const from = st.effective_date ? shortDate(st.effective_date) : "";
+  if (!st.end_date) return `${kind} from ${from}`;
+  if (st.end_date === st.effective_date) return `${kind} ${from}`;
+  return `${kind} ${from} - ${shortDate(st.end_date)}`;
+}
+
+interface OutForm { custodian: Custodian; status: AbsenceKind; start: string; end: string }
+
 const EDGE_PX = 80;
 const MAX_SCROLL_PX_PER_FRAME = 18;
 
@@ -27,9 +56,11 @@ export default function Custodians() {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<CustodianCreateRequest>({ name: "", shift_template_id: 1 });
   const [hoveredShift, setHoveredShift] = useState<string | null>(null);
-  // Set after any Out/In toggle - the day's schedule was generated against
-  // the old roster and stays stale until regenerated.
+  // Set after any absence change that touches today - the day's schedule
+  // was generated against the old roster and stays stale until regenerated.
   const [scheduleStale, setScheduleStale] = useState(false);
+  // The "mark out" form, open for one custodian at a time.
+  const [outForm, setOutForm] = useState<OutForm | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   // Edge auto-scroll state for the current drag, if one is in progress.
   const autoScroll = useRef<{ stop: () => void } | null>(null);
@@ -62,13 +93,27 @@ export default function Custodians() {
     load();
   }
 
-  async function toggleOut(c: Custodian) {
-    if (c.callout_id) {
-      await api.deleteCustodianStatus(c.id, c.callout_id);
-    } else {
-      const d = today();
-      await api.setCustodianStatus(c.id, { status: "callout", effective_date: d, end_date: d });
-    }
+  function openOutForm(c: Custodian) {
+    const d = today();
+    setOutForm({ custodian: c, status: "callout", start: d, end: d });
+  }
+
+  async function saveOut() {
+    if (!outForm) return;
+    const { custodian, status, start, end } = outForm;
+    await api.setCustodianStatus(custodian.id, {
+      status, effective_date: start, end_date: end || null,
+    });
+    setOutForm(null);
+    if (start <= today()) setScheduleStale(true);
+    load();
+  }
+
+  // Ends whatever absence is in effect today; future ones are kept.
+  async function markBack(c: Custodian) {
+    const label = c.current_status ? absenceLabel(c.current_status, today()) : "out";
+    if (!confirm(`Mark ${c.name} back as of today? (currently: ${label})`)) return;
+    await api.markCustodianBack(c.id, today());
     setScheduleStale(true);
     load();
   }
@@ -151,7 +196,7 @@ export default function Custodians() {
     members: custodians.filter(c => c.shift_template_id === s.id),
   }));
 
-  const outCount = custodians.filter(c => c.callout_id).length;
+  const outCount = custodians.filter(c => c.current_status).length;
   const coverageCount = custodians.filter(c => c.coverage_approved).length;
 
   return (
@@ -180,6 +225,52 @@ export default function Custodians() {
           </button>
           <button className="btn-primary" onClick={regenerateToday} disabled={regenerating}>
             {regenerating ? "Regenerating…" : "Regenerate Today"}
+          </button>
+        </div>
+      )}
+
+      {outForm && (
+        <div className="card flex gap-12 items-center" style={{ flexWrap: "wrap", borderLeft: "3px solid var(--red)" }}>
+          <span style={{ fontWeight: 600 }}>Mark {outForm.custodian.name} out</span>
+          <select
+            value={outForm.status}
+            onChange={e => setOutForm(f => f && { ...f, status: e.target.value as AbsenceKind })}
+          >
+            <option value="callout">Callout</option>
+            <option value="vacation">Vacation</option>
+            <option value="fmla">FMLA</option>
+          </select>
+          <label className="flex items-center gap-12" style={{ fontSize: 12 }}>
+            From
+            <input
+              type="date"
+              value={outForm.start}
+              onChange={e => setOutForm(f => f && { ...f, start: e.target.value })}
+            />
+          </label>
+          <label className="flex items-center gap-12" style={{ fontSize: 12 }} title="Leave blank to keep them out until marked back">
+            Through
+            <input
+              type="date"
+              value={outForm.end}
+              min={outForm.start}
+              onChange={e => setOutForm(f => f && { ...f, end: e.target.value })}
+            />
+          </label>
+          <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => setOutForm(f => f && { ...f, end: f.start })}>
+            Just that day
+          </button>
+          <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => setOutForm(f => f && { ...f, end: "" })}>
+            Until marked back
+          </button>
+          <span style={{ flex: 1 }} />
+          <button className="btn-secondary" onClick={() => setOutForm(null)}>Cancel</button>
+          <button
+            className="btn-primary"
+            onClick={saveOut}
+            disabled={!outForm.start || (!!outForm.end && outForm.end < outForm.start)}
+          >
+            Save
           </button>
         </div>
       )}
@@ -266,13 +357,18 @@ export default function Custodians() {
                         <td className="text-mono">{((c.productive_min || 450) / 60).toFixed(1)} hrs</td>
                         <td>
                           <button
-                            className={`badge ${c.callout_id ? "badge-red" : "badge-green"}`}
+                            className={`badge ${c.current_status ? "badge-red" : "badge-green"}`}
                             style={{ border: "none", cursor: "pointer" }}
-                            title={c.callout_id ? "Called out today - click to mark in" : "Click to mark out for today"}
-                            onClick={() => toggleOut(c)}
+                            title={c.current_status ? "Click to mark back as of today" : "Click to mark out"}
+                            onClick={() => (c.current_status ? markBack(c) : openOutForm(c))}
                           >
-                            {c.callout_id ? "Out" : "In"}
+                            {c.current_status ? absenceLabel(c.current_status, today()) : "In"}
                           </button>
+                          {c.upcoming_status && (
+                            <div className="text-muted" style={{ fontSize: 11, marginTop: 2 }}>
+                              {upcomingLabel(c.upcoming_status)}
+                            </div>
+                          )}
                         </td>
                         <td>
                           <button

@@ -9,7 +9,47 @@ const emptyForm = (): AssignmentCreateRequest => ({
   assignment_type: "primary",
   days_of_week: "",
   notes: "",
+  share_pct: 100,
 });
+
+// Inline editor for an assignment's share_pct. Saves on Enter or blur when
+// the value changed; an out-of-range entry is reverted, not sent. The
+// split is relative to the building's other primaries that work that day
+// (see planStandingAssignments in server/routes/schedules.ts), so the
+// tooltip lists who it is weighed against.
+function ShareInput({ a, others, onSave }: {
+  a: CustodianAssignment;
+  others: CustodianAssignment[];
+  onSave: (share: number) => Promise<void>;
+}) {
+  const [value, setValue] = useState(String(a.share_pct));
+  useEffect(() => { setValue(String(a.share_pct)); }, [a.share_pct]);
+
+  async function commit() {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < 1 || n > 100) { setValue(String(a.share_pct)); return; }
+    if (n !== a.share_pct) await onSave(n);
+  }
+
+  const total = others.reduce((sum, o) => sum + o.share_pct, a.share_pct);
+  const title = `Share of ${a.building_name}, weighed against: ` +
+    others.map(o => `${o.custodian_name} ${o.share_pct}${o.days_of_week ? ` (${o.days_of_week})` : ""}`).join(", ") +
+    `. On days everyone works: ${Math.round((a.share_pct / total) * 100)}%.`;
+
+  return (
+    <input
+      type="number"
+      min={1}
+      max={100}
+      className="share-input"
+      value={value}
+      title={title}
+      onChange={e => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+    />
+  );
+}
 
 function chipLabel(a: CustodianAssignment): string {
   let label = a.building_name ?? "";
@@ -50,6 +90,11 @@ export default function Assignments() {
     load();
   }
 
+  async function updateShare(id: number, share_pct: number) {
+    await api.updateAssignment(id, { share_pct });
+    load();
+  }
+
   async function removeAssignment(id: number) {
     await api.deleteAssignment(id);
     load();
@@ -66,6 +111,16 @@ export default function Assignments() {
     byCustodian.set(a.custodian_id, list);
   }
   const roster = [...custodians].sort((x, y) => x.name.localeCompare(y.name));
+
+  // Primaries per building, to find shared buildings (2+ primaries) whose
+  // chips get a share editor.
+  const primariesByBuilding = new Map<number, CustodianAssignment[]>();
+  for (const a of assignments) {
+    if (a.assignment_type !== "primary") continue;
+    const list = primariesByBuilding.get(a.building_id) ?? [];
+    list.push(a);
+    primariesByBuilding.set(a.building_id, list);
+  }
 
   return (
     <>
@@ -116,6 +171,17 @@ export default function Assignments() {
             onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
             style={{ flex: 1, minWidth: 160 }}
           />
+          <label className="flex items-center gap-12" style={{ fontSize: 12 }} title="Relative to other primaries on the same building - 100/100 and 50/50 both split evenly">
+            Share %
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={form.share_pct}
+              onChange={e => setForm(f => ({ ...f, share_pct: Math.min(100, Math.max(1, Math.round(+e.target.value) || 100)) }))}
+              style={{ width: 70 }}
+            />
+          </label>
           <button className="btn-primary" onClick={addAssignment} disabled={!form.custodian_id || !form.building_id}>
             Add
           </button>
@@ -146,12 +212,18 @@ export default function Assignments() {
                   <td style={{ fontWeight: 600, verticalAlign: "top", wordBreak: "break-word" }}>{c.name}</td>
                   <td>
                     {primary.length === 0 && <span className="text-muted">-</span>}
-                    {primary.map(a => (
+                    {primary.map(a => {
+                      const others = (primariesByBuilding.get(a.building_id) ?? []).filter(o => o.id !== a.id);
+                      return (
                       <span key={a.id} className="coverage-chip">
                         {chipLabel(a)}
+                        {others.length > 0 && (
+                          <ShareInput a={a} others={others} onSave={share => updateShare(a.id, share)} />
+                        )}
                         <button className="coverage-chip-remove" onClick={() => removeAssignment(a.id)} title="Remove">×</button>
                       </span>
-                    ))}
+                      );
+                    })}
                   </td>
                   <td>
                     {secondary.length === 0 && <span className="text-muted">-</span>}

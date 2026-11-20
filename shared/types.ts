@@ -74,8 +74,11 @@ export interface Custodian {
   shift_name?: string | null;
   start_time?: string | null;
   productive_min?: number | null;
-  // Only populated by GET /api/custodians: today's one-day callout row id.
-  callout_id?: number | null;
+  // Only populated by GET /api/custodians, for the requested date:
+  // the absence in effect (null = working), and the next absence that
+  // starts after that date, if any.
+  current_status?: CustodianStatus | null;
+  upcoming_status?: CustodianStatus | null;
 }
 
 export interface Team {
@@ -91,6 +94,9 @@ export interface CustodianAssignment {
   assignment_type: "primary" | "secondary";
   days_of_week: string | null;
   notes: string | null;
+  // Relative weight among the building's primaries on a given day (see
+  // seeds/013_assignment_share.sql). 100/100 and 50/50 both split evenly.
+  share_pct: number;
   custodian_name?: string;
   building_name?: string;
 }
@@ -162,6 +168,10 @@ export interface CoverageGap {
   // Hours at the building's own target_appa_level (L1-L3), not always L2 -
   // see buildings.target_appa_level.
   daily_hours: number | null;
+  // Portion of the building that is uncovered, 0-1 (daily_hours is
+  // already scaled by it). 1 for a fully uncovered building; e.g. 0.5 when
+  // one of two equal-share assignees is out.
+  uncovered_fraction: number;
   target_appa_level: number;
   // callout: every standing assignee covering it today is unavailable.
   // unassigned: no standing assignment applies to it today (unavailable is []).

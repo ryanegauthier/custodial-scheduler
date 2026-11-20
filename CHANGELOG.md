@@ -20,16 +20,6 @@
   just missing shift info. Not fixed here; noticed while tracking down why
   the Custodians page showed nobody (`shift_template_id` was never set for
   any of them, since none of the whiteboards specified shift start times).
-- Two buildings on a standing assignment with two active `primary` assignees
-  can overlap on a shared day (e.g. Boppell Hall: Randall all-days primary +
-  Yuriy Tue-Sat primary) - `POST /api/schedules/generate` credits each
-  primary the building's full `daily_hours_l2` independently, so an
-  overlapping day double-counts that building's hours across two people.
-  The fix applied in 2026-10-07's entry below only suppresses a redundant
-  `secondary` row when a `primary` already covers the building - it
-  deliberately doesn't touch primary-primary overlap, since it's ambiguous
-  from the whiteboard whether that's an intentional team-clean day or a
-  transcription artifact. Not fixed.
 - `buildings.daily_hours_l2` was computed (seeds/001-002) as APPA-ratio
   whole-building workload under the old multi-task-type/multi-person
   algorithm, not calibrated as one standing-assignee's daily capacity. Now
@@ -930,3 +920,144 @@ unapproved usually means limited physical capacity.
   currently the same three people (Hope and Oksana are on open-ended
   FMLA, Carlie is inactive), so the two-pool split has no visible effect
   until an unapproved unassigned custodian exists.
+
+### Assignment shares: shared buildings split their hours instead of double-counting
+
+Asked whether Warren Hall's "Boys side" / "Girls side" were different in
+the db: they weren't - one building row, two primary assignments, the
+sides only in free-text notes. Generate credited each primary the full
+building (Warren: 12.5h each, 25h for a 12.5h building), and with one
+side out the other still "covered" it, so no gap or coverage happened.
+Ten buildings had 2-3 primaries, all double/triple-counted (the
+primary-primary overlap Known Issue, now removed). User chose a general
+share percentage over splitting Warren into two building rows, starting
+50/50 and editable (e.g. 60/40).
+
+- New `seeds/013_assignment_share.sql`: `custodian_assignments.share_pct
+  INTEGER NOT NULL DEFAULT 100`, then Warren's two rows set to 50,
+  guarded to only run while both are still 100 so a re-run doesn't reset
+  an edited split.
+- `server/routes/schedules.ts`: new `planStandingAssignments(date)`, now
+  the single place that decides standing tasks *and* callout gaps (both
+  `POST /generate` and `buildUncoveredBuildings` call it, replacing two
+  separate copies of the "who covers this building" logic):
+  - `share_pct` is a relative weight among the building's primaries that
+    apply *that day*: hours = building hours x share / (sum of that day's
+    primary shares). 50/50 and 100/100 are the same even split. Chosen
+    over literal fixed fractions because several overlaps are day-limited
+    (Boppell: Randall all days, Yuriy Tue-Sat) - a fixed 50% would leave
+    Monday half-staffed; weights give Randall 100% on Monday and 50% on
+    Tue-Sat.
+  - An unavailable primary's fraction is "missing". Available secondaries
+    take over just that portion (split by their own shares) - previously
+    a secondary only stepped in when *every* primary was out, and took the
+    whole building. With no secondary, the missing portion becomes a
+    callout gap with `daily_hours` scaled to it, so coverage gets 43% of
+    that portion (Olga out -> Isaiah gets 43% of half of Warren).
+  - A building with only secondaries that day treats them as primaries
+    (unchanged behavior when shares are equal).
+  - Standing task hours are no longer rounded, so a sole assignee gets
+    exactly the building's hours (caught by an existing test).
+- `shared/types.ts`: `CustodianAssignment.share_pct`;
+  `CoverageGap.uncovered_fraction` (1 for whole-building gaps and
+  leftovers). `shared/schemas.ts`: `share_pct` (int 1-100, default 100)
+  on create; new `assignmentUpdateRequestSchema`.
+- `server/routes/assignments.ts`: `POST` accepts `share_pct`; new
+  `PATCH /:id` updates only `share_pct` (other fields still change by
+  remove + re-add). `client/src/api.ts`: `updateAssignment`.
+- `client/src/pages/Assignments.tsx`: primary chips on a building with 2+
+  primaries get a small % box (saves on Enter/blur, out-of-range reverts;
+  tooltip lists who it is weighed against and the split on days everyone
+  works). Add form gains "Share %". Secondary chips have no editor -
+  secondary shares only matter between two secondaries covering the same
+  absence, which no current building has. `client/src/index.css`:
+  `.share-input`.
+- `client/src/pages/ScheduleBoard.tsx`: partial gaps say "N% of building
+  uncovered".
+- Tests (`tests/schedules.test.ts`, 4 new): Warren 50/50 from the seed and
+  60/40 after PATCH, PATCH rejects 0; Olga out -> Brandon keeps exactly
+  half and Warren is either covered at 43% of half or a 50% gap; Boppell
+  is all Randall on Monday and an even split on Tuesday; Michael out on a
+  Friday -> Clif (secondary) gets exactly Michael's half of Field House,
+  no gap. 21/21 pass, typecheck passes.
+- Verified on a copy of the live db (db:init applies 013 once, skips on
+  re-run). Wednesday standing hours across the roster: 179.7 -> 114.4.
+  Warren 12.50/12.50 -> 6.25/6.25; Andrew 14.42 -> 7.21; Michael 24.16 ->
+  12.73. Olga out: Brandon keeps 6.25h, Isaiah gets Restrooms/Trash for
+  her half (2.69h). The Assignments page editor was not checked in a
+  browser.
+- Still open: many people remain over 7.5h from standing work alone -
+  that is the separate `daily_hours_l2` calibration Known Issue, not
+  double-counting.
+- Reverting: the code is one commit on top of `5f570ff`. The db column
+  stays after a code revert (old code ignores it, default 100 is
+  harmless); `data/custodial.db.pre-share-backup` is a pre-migration copy
+  of the live db if a full rollback is wanted.
+
+### Data: Hope and Oksana back from FMLA (live db, 2026-11-20)
+
+Both had open-ended `fmla` rows from the 2026-10-07 whiteboard ("FMLA, no
+dates given"), so generation treated them as unavailable every day while
+the Custodians page showed them "In" (the badge only knew one-day
+callouts). User confirmed both are back. Added an `active` row for each
+via `POST /api/custodians/:id/status` (`effective_date` 2026-11-20, open
+end, note "Back from FMLA"), which outranks the undated FMLA row under
+status precedence. History kept: 2026-11-19 and earlier still resolve to
+FMLA. Done before the "back" endpoint below existed; that endpoint would
+have set the FMLA rows' `end_date` to 2026-11-19 instead. Equivalent
+result, left as is.
+
+### Extended absences: callout/vacation/FMLA date ranges, and "back"
+
+The backend already stored and honored date ranges (`custodian_status`
+`effective_date`/`end_date`, respected by generate); only the Custodians
+page was limited to one-day callouts, and its badge didn't show
+FMLA/vacation at all.
+
+- `server/routes/custodians.ts`:
+  - `GET /` (optional `?date=`, default today) returns `current_status`
+    (the winning absence covering that date, or null when working) and
+    `upcoming_status` (soonest absence starting after it) per custodian,
+    replacing the one-day-only `callout_id`.
+  - New `POST /:id/back { date }`: ends every non-active status row
+    covering `date`. Rows starting on/after `date` are deleted; rows that
+    started earlier (or have no start) get `end_date` = the day before, so
+    the absence's history stays. Later absences are untouched. Replaces
+    the page's use of `DELETE /:id/status/:statusId`, which is kept as a
+    plain API for correcting a mistaken entry.
+  - Status precedence extracted into `byPrecedence` (also used by
+    `GET /:id/status`).
+- Status precedence tiebreak, in both `byPrecedence` and
+  `server/routes/schedules.ts`'s `unavailableCustodianMap`: rows with the
+  same start date previously tied, and the winner depended on query
+  order. Now the newest record (highest id) wins. Real case: Hope's
+  "back" row starts 2026-11-20, so marking her out that same day would
+  otherwise have been ignored by generate. The two precedence
+  implementations remain duplicated (custodians.ts and schedules.ts);
+  noted in both, not merged.
+- `shared/schemas.ts`: status create rejects `end_date` before
+  `effective_date` (400); new `custodianBackRequestSchema`.
+  `shared/types.ts`: `Custodian.current_status`/`upcoming_status` replace
+  `callout_id`. `client/src/api.ts`: `markCustodianBack`.
+- `client/src/pages/Custodians.tsx`: the Today badge shows the absence in
+  effect ("Out", "Out thru Fri 11/22", "Vacation thru ...", "FMLA", "Out
+  until back"). Clicking "In" opens a form: Callout/Vacation/FMLA, From
+  (default today), Through (default today; blank = until marked back),
+  with "Just that day" / "Until marked back" shortcuts. Clicking a red
+  badge confirms and marks the person back as of today. An upcoming
+  absence shows under the badge ("Vacation Mon 11/24 - Wed 11/26"). The
+  regenerate banner appears when a change touches today (a future-only
+  absence doesn't trigger it). "N out today" counts any absence.
+- Tests (`tests/schedules.test.ts`, 5 new): a 3-day vacation is upcoming
+  before, current during and gone after, and generate skips the person
+  mid-range only; back mid-range sets `end_date` to the day before with
+  earlier days still out, back on the first day deletes the row; back
+  ends an undated open-ended FMLA and keeps a later vacation as
+  `upcoming_status`; a same-day callout beats an `active` row (badge and
+  generate); end before start is a 400. 26/26 pass, typecheck passes.
+- Verified on a copy of the live db: Hope and Oksana read FMLA on 11-19
+  and in on 11-20, Ryan G out on 11-20; an Olga vacation 11-24..11-26
+  shows as upcoming on 11-20 and current on 11-25. The page itself was
+  not checked in a browser.
+- Not done: editing an existing absence's dates in place (end it with
+  "back" and re-add), and partial-day absences.

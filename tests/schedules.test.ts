@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import type { BuildingTask, DailySchedule } from "../shared/types";
+import type { BuildingTask, Custodian, DailySchedule } from "../shared/types";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const tmpDir = mkdtempSync(path.join(tmpdir(), "custodial-schedules-"));
@@ -310,4 +310,191 @@ test("a building assigned only on some days is a leftover on its other days (Gra
   const wedTypes = await db.all<{ task_type_id: number }>(
     "SELECT task_type_id FROM building_tasks WHERE schedule_date = ? AND building_id = ?", [wednesday, graves!.id]);
   assert.deepEqual(wedTypes.map(t => t.task_type_id), [6], "Wednesday should be Michael's standing assignment only");
+});
+
+// --- Assignment shares (seeds/013_assignment_share.sql) ---
+// 2031-06-02 is a Monday, 06-03 a Tuesday, 06-06 a Friday.
+
+async function buildingHours(name: string) {
+  return (await db.get<{ id: number; hours: number }>(
+    `SELECT id, CASE COALESCE(target_appa_level, 2) WHEN 1 THEN daily_hours_l1
+       WHEN 3 THEN daily_hours_l3 ELSE daily_hours_l2 END as hours
+     FROM buildings WHERE name = ?`, [name]))!;
+}
+
+async function standingHours(date: string, buildingId: number) {
+  const rows = await db.all<{ name: string; estimated_hours: number }>(
+    `SELECT c.name, bt.estimated_hours FROM building_tasks bt JOIN custodians c ON c.id = bt.assigned_to
+     WHERE bt.schedule_date = ? AND bt.building_id = ? AND bt.task_type_id = 6`, [date, buildingId]);
+  return Object.fromEntries(rows.map(r => [r.name, r.estimated_hours]));
+}
+
+const approx = (a: number, b: number) => Math.abs(a - b) < 1e-6;
+
+test("shared building splits by share (Warren 50/50 from the seed, then 60/40 after a PATCH)", async () => {
+  const w = await buildingHours("Warren Hall");
+  await generate("2031-06-02");
+  let split = await standingHours("2031-06-02", w.id);
+  assert.ok(approx(split.Brandon, w.hours / 2) && approx(split.Olga, w.hours / 2), JSON.stringify(split));
+
+  const rows = await db.all<{ id: number; name: string; share_pct: number }>(
+    `SELECT ca.id, c.name, ca.share_pct FROM custodian_assignments ca JOIN custodians c ON c.id = ca.custodian_id
+     WHERE ca.building_id = ?`, [w.id]);
+  const patch = (id: number, share_pct: number) => fetch(`${baseUrl}/api/assignments/${id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ share_pct }),
+  });
+  try {
+    for (const r of rows) assert.equal((await patch(r.id, r.name === "Olga" ? 60 : 40)).status, 200);
+    await generate("2031-06-09");
+    split = await standingHours("2031-06-09", w.id);
+    assert.ok(approx(split.Olga, w.hours * 0.6) && approx(split.Brandon, w.hours * 0.4), JSON.stringify(split));
+    assert.equal((await patch(rows[0].id, 0)).status, 400, "share must be 1-100");
+  } finally {
+    for (const r of rows) await db.run("UPDATE custodian_assignments SET share_pct = ? WHERE id = ?", [r.share_pct, r.id]);
+  }
+});
+
+test("one side out leaves only their portion uncovered, and coverage takes 43% of that portion", async () => {
+  const date = "2031-06-16";
+  const w = await buildingHours("Warren Hall");
+  await callOut("Olga", date);
+  const result = await generate(date);
+
+  const split = await standingHours(date, w.id);
+  assert.ok(approx(split.Brandon, w.hours / 2), "Brandon keeps his half");
+  assert.equal(split.Olga, undefined);
+
+  const coverage = result.coverage_assigned.find(a => a.building_id === w.id);
+  if (coverage) {
+    assert.equal(coverage.reason, "callout");
+    const hrs = await db.get<{ h: number }>(
+      `SELECT sum(estimated_hours) h FROM building_tasks WHERE schedule_date = ? AND building_id = ? AND task_type_id IN (2,3,4)`,
+      [date, w.id]);
+    assert.ok(Math.abs(hrs!.h - (w.hours / 2) * 0.43) < 0.01, `expected 43% of half of Warren, got ${hrs!.h}`);
+  } else {
+    const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+    const gap = schedule.coverage_gaps.find(g => g.building_id === w.id);
+    assert.ok(gap, "Warren's uncovered half should be covered or listed as a gap");
+    assert.ok(approx(gap!.uncovered_fraction, 0.5) && approx(gap!.daily_hours!, w.hours / 2));
+  }
+});
+
+test("a primary who only works some days gets the whole building on the others (Boppell)", async () => {
+  const b = await buildingHours("Boppell Hall");
+  await generate("2031-06-02"); // Monday: Randall only
+  const mon = await standingHours("2031-06-02", b.id);
+  assert.deepEqual(Object.keys(mon), ["Randall"]);
+  assert.ok(approx(mon.Randall, b.hours));
+
+  await generate("2031-06-03"); // Tuesday: Randall + Yuriy, even split
+  const tue = await standingHours("2031-06-03", b.id);
+  assert.ok(approx(tue.Randall, b.hours / 2) && approx(tue.Yuriy, b.hours / 2), JSON.stringify(tue));
+});
+
+test("an available secondary takes over just the missing primary's portion (Field House, Friday)", async () => {
+  // Phil (all days) and Michael (Wed-Sun) are primaries; Clif is the
+  // Friday secondary.
+  const date = "2031-06-06";
+  const f = await buildingHours("Field House");
+  await callOut("Michael", date);
+  await generate(date);
+  const split = await standingHours(date, f.id);
+  assert.ok(approx(split.Phil, f.hours / 2), JSON.stringify(split));
+  assert.ok(approx(split.Clif, f.hours / 2), "Clif covers Michael's half");
+  const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+  assert.ok(!schedule.coverage_gaps.some(g => g.building_id === f.id));
+});
+
+// --- Extended absences and "back" (POST /api/custodians/:id/back) ---
+
+async function custodianOn(name: string, date: string) {
+  const list = await fetch(`${baseUrl}/api/custodians?date=${date}`).then(json<Custodian[]>);
+  return list.find(c => c.name === name)!;
+}
+
+async function postStatus(id: number, body: Record<string, unknown>) {
+  return fetch(`${baseUrl}/api/custodians/${id}/status`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+}
+
+async function back(id: number, date: string) {
+  return fetch(`${baseUrl}/api/custodians/${id}/back`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date }),
+  }).then(json<{ ok: boolean; ended: number }>);
+}
+
+async function hasStandingTasks(name: string, date: string) {
+  const r = await db.get<{ n: number }>(
+    `SELECT count(*) n FROM building_tasks bt JOIN custodians c ON c.id = bt.assigned_to
+     WHERE bt.schedule_date = ? AND c.name = ? AND bt.task_type_id = 6`, [date, name]);
+  return Number(r!.n) > 0;
+}
+
+test("a multi-day absence applies to every day in its range and shows as current/upcoming", async () => {
+  const phil = await custodianOn("Phil", "2031-07-01");
+  assert.equal((await postStatus(phil.id, {
+    status: "vacation", effective_date: "2031-07-02", end_date: "2031-07-04",
+  })).status, 200);
+
+  assert.equal((await custodianOn("Phil", "2031-07-01")).upcoming_status?.status, "vacation");
+  assert.equal((await custodianOn("Phil", "2031-07-03")).current_status?.status, "vacation");
+  assert.equal((await custodianOn("Phil", "2031-07-05")).current_status, null);
+
+  await generate("2031-07-03");
+  assert.equal(await hasStandingTasks("Phil", "2031-07-03"), false, "Phil is on vacation mid-range");
+  await generate("2031-07-05");
+  assert.equal(await hasStandingTasks("Phil", "2031-07-05"), true, "Phil is back after the range");
+});
+
+test("back mid-absence ends it the day before (history kept); back on its first day deletes it", async () => {
+  const phil = await custodianOn("Phil", "2031-07-10");
+  const { id: rangeId } = await postStatus(phil.id, {
+    status: "callout", effective_date: "2031-07-10", end_date: null,
+  }).then(json<{ id: number }>);
+
+  const r1 = await back(phil.id, "2031-07-12");
+  assert.equal(r1.ended, 1);
+  const row = await db.get<{ end_date: string }>("SELECT end_date FROM custodian_status WHERE id = ?", [rangeId]);
+  assert.equal(row!.end_date, "2031-07-11");
+  assert.equal((await custodianOn("Phil", "2031-07-11")).current_status?.status, "callout", "history kept");
+  assert.equal((await custodianOn("Phil", "2031-07-12")).current_status, null);
+
+  const { id: dayId } = await postStatus(phil.id, {
+    status: "callout", effective_date: "2031-07-15", end_date: "2031-07-15",
+  }).then(json<{ id: number }>);
+  await back(phil.id, "2031-07-15");
+  assert.ok(!(await db.get("SELECT id FROM custodian_status WHERE id = ?", [dayId])), "same-day record deleted");
+});
+
+test("back ends an open-ended FMLA with no start date, and leaves a later absence alone", async () => {
+  const phil = await custodianOn("Phil", "2031-07-20");
+  const { id: fmlaId } = await postStatus(phil.id, { status: "fmla", effective_date: null, end_date: null })
+    .then(json<{ id: number }>);
+  const { id: laterId } = await postStatus(phil.id, {
+    status: "vacation", effective_date: "2031-08-01", end_date: "2031-08-03",
+  }).then(json<{ id: number }>);
+
+  await back(phil.id, "2031-07-20");
+  const fmla = await db.get<{ end_date: string }>("SELECT end_date FROM custodian_status WHERE id = ?", [fmlaId]);
+  assert.equal(fmla!.end_date, "2031-07-19");
+  assert.ok(await db.get("SELECT id FROM custodian_status WHERE id = ?", [laterId]), "future vacation kept");
+  assert.equal((await custodianOn("Phil", "2031-07-20")).upcoming_status?.id, laterId);
+});
+
+test("a callout added on the same day as an earlier 'active' row wins (newest record)", async () => {
+  // e.g. Hope: a "back from FMLA" active row starting today, then marked out today.
+  const date = "2031-07-24";
+  const phil = await custodianOn("Phil", date);
+  await postStatus(phil.id, { status: "active", effective_date: date, end_date: null });
+  await postStatus(phil.id, { status: "callout", effective_date: date, end_date: date });
+  assert.equal((await custodianOn("Phil", date)).current_status?.status, "callout");
+  await generate(date);
+  assert.equal(await hasStandingTasks("Phil", date), false);
+});
+
+test("an absence ending before it starts is rejected", async () => {
+  const phil = await custodianOn("Phil", "2031-07-01");
+  const res = await postStatus(phil.id, { status: "callout", effective_date: "2031-07-05", end_date: "2031-07-01" });
+  assert.equal(res.status, 400);
 });

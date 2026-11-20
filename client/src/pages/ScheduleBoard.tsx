@@ -227,6 +227,7 @@ export default function ScheduleBoard() {
                       {g.reason === "unassigned"
                         ? "No standing assignment today"
                         : g.unavailable.map(u => `${u.custodian_name} (${u.status})`).join(", ")}
+                      {g.uncovered_fraction < 0.999 && ` - ${Math.round(g.uncovered_fraction * 100)}% of building uncovered`}
                     </div>
                   </div>
                 ))}

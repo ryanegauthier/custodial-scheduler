@@ -1,6 +1,6 @@
 import { Router } from "express";
 import db from "../db/index";
-import { assignmentCreateRequestSchema } from "../../shared/schemas";
+import { assignmentCreateRequestSchema, assignmentUpdateRequestSchema } from "../../shared/schemas";
 import type { CustodianAssignment } from "../../shared/types";
 
 const router = Router();
@@ -18,12 +18,22 @@ router.get("/", async (_req, res) => {
 router.post("/", async (req, res) => {
   const parsed = assignmentCreateRequestSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { custodian_id, building_id, assignment_type, days_of_week, notes } = parsed.data;
+  const { custodian_id, building_id, assignment_type, days_of_week, notes, share_pct } = parsed.data;
   const r = await db.run(
-    `INSERT INTO custodian_assignments (custodian_id, building_id, assignment_type, days_of_week, notes)
-     VALUES (?, ?, ?, ?, ?)`,
-    [custodian_id, building_id, assignment_type, days_of_week ?? null, notes ?? null]);
+    `INSERT INTO custodian_assignments (custodian_id, building_id, assignment_type, days_of_week, notes, share_pct)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [custodian_id, building_id, assignment_type, days_of_week ?? null, notes ?? null, share_pct]);
   res.json({ id: Number(r.lastInsertRowid) });
+});
+
+// Only share_pct is editable in place; other fields are still changed by
+// removing and re-adding the assignment, as before.
+router.patch("/:id", async (req, res) => {
+  const parsed = assignmentUpdateRequestSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  await db.run("UPDATE custodian_assignments SET share_pct = ? WHERE id = ?",
+    [parsed.data.share_pct, req.params.id]);
+  res.json({ ok: true });
 });
 
 router.delete("/:id", async (req, res) => {

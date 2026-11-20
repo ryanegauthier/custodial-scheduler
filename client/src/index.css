@@ -348,6 +348,14 @@ select:focus, input:focus { border-color: var(--gold); }
 }
 
 /* Assignments page: per-custodian coverage chips */
+/* Share % editor inside a chip for a building with 2+ primaries */
+.share-input {
+  width: 46px;
+  padding: 1px 4px;
+  margin-left: 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
 .coverage-chip {
   display: inline-flex;
   align-items: center;

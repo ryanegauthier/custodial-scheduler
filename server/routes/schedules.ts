@@ -57,6 +57,7 @@ interface AssignmentRow {
   assignment_type: "primary" | "secondary";
   days_of_week: string | null;
   notes: string | null;
+  share_pct: number;
   custodian_name: string;
   building_name: string;
   zone_id: number | null;
@@ -80,6 +81,7 @@ function hoursAtTargetLevel(
 }
 
 interface StatusRow {
+  id: number;
   custodian_id: number;
   status: string;
   effective_date: string | null;
@@ -94,7 +96,7 @@ interface StatusRow {
 // covers the same date).
 async function unavailableCustodianMap(date: string): Promise<Map<number, string>> {
   const rows = await db.all<StatusRow>(
-    `SELECT custodian_id, status, effective_date, end_date FROM custodian_status
+    `SELECT id, custodian_id, status, effective_date, end_date FROM custodian_status
      WHERE (effective_date IS NULL OR effective_date <= ?)
        AND (end_date IS NULL OR end_date >= ?)`,
     [date, date]);
@@ -111,7 +113,9 @@ async function unavailableCustodianMap(date: string): Promise<Map<number, string
     list.sort((a, b) => {
       if (!a.effective_date && b.effective_date) return 1;
       if (a.effective_date && !b.effective_date) return -1;
-      return (b.effective_date ?? "").localeCompare(a.effective_date ?? "");
+      // Same start date: the newest record wins (e.g. a callout added
+      // today over a "back from FMLA" active row that also starts today).
+      return (b.effective_date ?? "").localeCompare(a.effective_date ?? "") || b.id - a.id;
     });
     const current = list[0];
     if (current.status !== "active") unavailable.set(custodianId, current.status);
@@ -135,9 +139,98 @@ async function getAssignmentsForDate(date: string) {
   return { assignments: todays, unavailable };
 }
 
-// A building is a coverage gap when every standing assignment covering it
-// today belongs to an unavailable custodian - a secondary assignee who is
-// still active covers the primary's absence, so no gap is reported. A
+interface StandingTask { building_id: number; custodian_id: number; hours: number }
+
+// Splits each building's daily hours across the standing assignments that
+// apply on `date`, and reports the portion left uncovered by absences.
+// Single source of truth for both POST /generate (the tasks) and the
+// coverage-gap list (the gaps), so the two can't disagree.
+//
+// share_pct is a relative weight among the building's primaries *that
+// apply that day*, not a fixed fraction: each gets hours * share /
+// (sum of that day's primary shares). So 50/50 and 100/100 both split
+// evenly, 60/40 splits 60/40, and a building whose second primary only
+// works some days (e.g. Boppell: Randall all days, Yuriy Tue-Sat) is 100%
+// Randall on Monday and split on Tue-Sat - without double-counting the
+// building's hours on shared days.
+//
+// Absences: an unavailable primary's portion is "missing". Available
+// secondaries take over the missing portion (split by their own
+// share_pct); with none available it becomes a callout gap for just that
+// portion (e.g. Olga out -> 50% of Warren). A building with only
+// secondaries that day treats them as its primaries.
+async function planStandingAssignments(date: string): Promise<{
+  tasks: StandingTask[]; callouts: CoverageGap[]; assignedToday: Set<number>;
+}> {
+  const { assignments, unavailable } = await getAssignmentsForDate(date);
+
+  const byBuilding = new Map<number, AssignmentRow[]>();
+  for (const a of assignments) {
+    const list = byBuilding.get(a.building_id) ?? [];
+    list.push(a);
+    byBuilding.set(a.building_id, list);
+  }
+
+  const weightSum = (rows: AssignmentRow[]) => rows.reduce((sum, r) => sum + Math.max(r.share_pct, 0), 0);
+  const tasks: StandingTask[] = [];
+  const callouts: CoverageGap[] = [];
+
+  for (const rows of byBuilding.values()) {
+    const first = rows[0];
+    const { hours, level } = hoursAtTargetLevel(first);
+    const buildingHours = hours ?? 0;
+
+    const primaries = rows.filter(r => r.assignment_type === "primary");
+    const covering = primaries.length ? primaries : rows;
+    const backups = primaries.length ? rows.filter(r => r.assignment_type === "secondary") : [];
+
+    // Every share 0 (or bad data): fall back to an even split.
+    const total = weightSum(covering);
+    const fraction = (r: AssignmentRow) =>
+      total > 0 ? Math.max(r.share_pct, 0) / total : 1 / covering.length;
+
+    let missing = 0;
+    for (const r of covering) {
+      if (unavailable.has(r.custodian_id)) missing += fraction(r);
+      else tasks.push({ building_id: r.building_id, custodian_id: r.custodian_id, hours: buildingHours * fraction(r) });
+    }
+    if (missing <= 1e-9) continue;
+
+    const availableBackups = backups.filter(r => !unavailable.has(r.custodian_id));
+    if (availableBackups.length) {
+      const backupTotal = weightSum(availableBackups);
+      for (const r of availableBackups) {
+        const f = backupTotal > 0 ? Math.max(r.share_pct, 0) / backupTotal : 1 / availableBackups.length;
+        tasks.push({ building_id: r.building_id, custodian_id: r.custodian_id, hours: buildingHours * missing * f });
+      }
+      continue;
+    }
+
+    callouts.push({
+      building_id: first.building_id,
+      building_name: first.building_name,
+      zone_id: first.zone_id,
+      zone_name: first.zone_name,
+      zone_color: first.zone_color,
+      daily_hours: hours == null ? null : buildingHours * missing,
+      uncovered_fraction: missing,
+      target_appa_level: level,
+      reason: "callout",
+      unavailable: covering.filter(r => unavailable.has(r.custodian_id)).map(r => ({
+        custodian_id: r.custodian_id,
+        custodian_name: r.custodian_name,
+        status: unavailable.get(r.custodian_id) ?? "unknown",
+      })),
+    });
+  }
+
+  callouts.sort((a, b) => (b.daily_hours ?? 0) - (a.daily_hours ?? 0));
+  return { tasks, callouts, assignedToday: new Set(byBuilding.keys()) };
+}
+
+// A building (or the absent custodian's portion of a shared one) is a
+// coverage gap when its standing assignee is unavailable and no secondary
+// steps in, or when no standing assignment applies to it today. A
 // building whose restroom/trash coverage tasks are assigned to someone
 // for that date is no longer a gap; unassigning them (Schedule Board)
 // makes it one again.
@@ -151,43 +244,11 @@ async function buildCoverageGaps(date: string): Promise<CoverageGap[]> {
 }
 
 async function buildUncoveredBuildings(date: string): Promise<CoverageGap[]> {
-  const { assignments, unavailable } = await getAssignmentsForDate(date);
-
-  const byBuilding = new Map<number, AssignmentRow[]>();
-  for (const a of assignments) {
-    const list = byBuilding.get(a.building_id) ?? [];
-    list.push(a);
-    byBuilding.set(a.building_id, list);
-  }
-
-  const gaps: CoverageGap[] = [];
-  for (const rows of byBuilding.values()) {
-    const anyoneAvailable = rows.some(r => !unavailable.has(r.custodian_id));
-    if (anyoneAvailable) continue;
-    const first = rows[0];
-    const { hours, level } = hoursAtTargetLevel(first);
-    gaps.push({
-      building_id: first.building_id,
-      building_name: first.building_name,
-      zone_id: first.zone_id,
-      zone_name: first.zone_name,
-      zone_color: first.zone_color,
-      daily_hours: hours,
-      target_appa_level: level,
-      reason: "callout",
-      unavailable: rows.map(r => ({
-        custodian_id: r.custodian_id,
-        custodian_name: r.custodian_name,
-        status: unavailable.get(r.custodian_id) ?? "unknown",
-      })),
-    });
-  }
-  gaps.sort((a, b) => (b.daily_hours ?? 0) - (a.daily_hours ?? 0));
+  const { callouts: gaps, assignedToday } = await planStandingAssignments(date);
 
   // Buildings no standing assignment applies to today - never assigned,
   // or assigned only on other days (e.g. Graves Gym is Wed-Sun, so it is
   // unassigned on Mon/Tue).
-  const assignedToday = new Set(assignments.map(a => a.building_id));
   type BuildingRow = Pick<AssignmentRow, "building_id" | "building_name" | "zone_id" | "zone_name" |
     "zone_color" | "daily_hours_l1" | "daily_hours_l2" | "daily_hours_l3" | "target_appa_level">;
   const leftover = (await db.all<BuildingRow>(`
@@ -205,6 +266,7 @@ async function buildUncoveredBuildings(date: string): Promise<CoverageGap[]> {
         zone_name: b.zone_name,
         zone_color: b.zone_color,
         daily_hours: hours,
+        uncovered_fraction: 1,
         target_appa_level: level,
         reason: "unassigned",
         unavailable: [],
@@ -281,32 +343,22 @@ router.post("/generate", async (req, res) => {
   await db.run("DELETE FROM disruptions WHERE disruption_date < date('now', ?)", [`-${RETENTION_DAYS} days`]);
   await db.run("DELETE FROM daily_coverage WHERE coverage_date < date('now', ?)", [`-${RETENTION_DAYS} days`]);
 
-  // Load today's standing assignments and drop anyone on fmla/callout/
-  // vacation. A secondary assignment only generates a task when every
-  // primary assignment on that building is unavailable - it's backup
-  // coverage, not a second simultaneous full-hours shift on top of an
-  // already-covered building (otherwise a building with both an active
-  // primary and an active secondary would double-count its daily hours
-  // under two people every day). Buildings left with nobody covering
-  // them show up in coverage_gaps instead of getting an unassigned row.
-  const { assignments, unavailable } = await getAssignmentsForDate(date);
-
-  const availablePrimaryBuildings = new Set(
-    assignments
-      .filter(a => a.assignment_type === "primary" && !unavailable.has(a.custodian_id))
-      .map(a => a.building_id));
+  // Standing assignments, split by share_pct and minus anyone on fmla/
+  // callout/vacation (see planStandingAssignments). Uncovered portions
+  // are handled by coverage below, or reported in coverage_gaps.
+  const { tasks: standingTasks } = await planStandingAssignments(date);
+  const { unavailable } = await getAssignmentsForDate(date);
 
   let tasksCreated = 0;
   const hoursByCustodian = new Map<number, number>();
-  for (const a of assignments) {
-    if (unavailable.has(a.custodian_id)) continue;
-    if (a.assignment_type === "secondary" && availablePrimaryBuildings.has(a.building_id)) continue;
-    const hours = hoursAtTargetLevel(a).hours ?? 0;
+  for (const t of standingTasks) {
+    // Not rounded: a sole assignee must get exactly the building's hours.
+    const hours = t.hours;
     await db.run(`INSERT INTO building_tasks
       (building_id, task_type_id, estimated_hours, schedule_date, status, assigned_to)
       VALUES (?, ?, ?, ?, 'assigned', ?)`,
-      [a.building_id, STANDING_ASSIGNMENT_TASK_TYPE, hours, date, a.custodian_id]);
-    hoursByCustodian.set(a.custodian_id, (hoursByCustodian.get(a.custodian_id) ?? 0) + hours);
+      [t.building_id, STANDING_ASSIGNMENT_TASK_TYPE, hours, date, t.custodian_id]);
+    hoursByCustodian.set(t.custodian_id, (hoursByCustodian.get(t.custodian_id) ?? 0) + hours);
     tasksCreated++;
   }
 
