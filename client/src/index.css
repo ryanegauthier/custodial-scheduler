@@ -326,6 +326,27 @@ select:focus, input:focus { border-color: var(--gold); }
 .alert-err  { background: rgba(231,76,60,0.1);   border: 1px solid rgba(231,76,60,0.3);  color: var(--red); }
 .alert-info { background: rgba(52,152,219,0.1);  border: 1px solid rgba(52,152,219,0.3); color: var(--blue); }
 
+/* App-wide API error toast (App.tsx). Solid surface underneath the
+   .alert-err tint, since it floats over page content. */
+.toast-err {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  max-width: min(420px, calc(100vw - 32px));
+  z-index: 1000;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  color: var(--red);
+  border: 1px solid rgba(231,76,60,0.5);
+  background: linear-gradient(rgba(231,76,60,0.12), rgba(231,76,60,0.12)), var(--surface);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+}
+
 /* Assignments page: per-custodian coverage chips */
 .coverage-chip {
   display: inline-flex;

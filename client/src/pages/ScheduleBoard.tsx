@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import type { DailySchedule } from "@shared/types";
 import type { AIRebalanceResult } from "@shared/schemas";
 
@@ -25,8 +25,8 @@ export default function ScheduleBoard() {
     setError(null);
     try {
       setSchedule(await api.getSchedule(d));
-    } catch {
-      setError("Could not load schedule.");
+    } catch (e) {
+      setError(`Could not load schedule: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
     }
@@ -35,13 +35,14 @@ export default function ScheduleBoard() {
   async function generateSchedule(force = false) {
     setGenerating(true);
     try {
-      const { status } = await api.generateSchedule(date, force);
-      if (status === 409) {
-        setError("Schedule already exists for this date.");
-      } else {
-        setError(null);
-        await fetchSchedule(date);
-      }
+      await api.generateSchedule(date, force);
+      setError(null);
+      await fetchSchedule(date);
+    } catch (e) {
+      // 409 = already generated for this date (force not set). Anything
+      // else is rethrown for App.tsx's error toast.
+      if (e instanceof ApiError && e.status === 409) setError("Schedule already exists for this date.");
+      else throw e;
     } finally {
       setGenerating(false);
     }
@@ -192,12 +193,14 @@ export default function ScheduleBoard() {
             </div>
           </div>
 
-          {/* Right: coverage gaps - buildings whose custodian is out */}
+          {/* Right: coverage gaps - buildings nobody is cleaning today: their
+              custodian is out, or no standing assignment applies today, and
+              the coverage pool had no room for them */}
           <div>
             <div className="column-heading">Coverage Gaps ({gaps.length})</div>
             {gaps.length === 0 && (
               <div className="card" style={{ textAlign: "center", padding: 24, color: "var(--text-muted)" }}>
-                No gaps - every standing assignment is covered today.
+                No gaps - every building is covered today.
               </div>
             )}
             {gaps.length > 0 && (
@@ -214,12 +217,16 @@ export default function ScheduleBoard() {
                         )}
                       </div>
                       <div>
-                        <div className="gap-hours">{(g.daily_hours ?? 0).toFixed(1)}h</div>
+                        <div className="gap-hours">
+                          {g.daily_hours == null ? "no hours data" : `${g.daily_hours.toFixed(1)}h`}
+                        </div>
                         <div style={{ fontSize: 10, color: "var(--text-muted)", textAlign: "right", marginTop: 2 }}>L{g.target_appa_level}</div>
                       </div>
                     </div>
                     <div className="gap-reason">
-                      {g.unavailable.map(u => `${u.custodian_name} (${u.status})`).join(", ")}
+                      {g.reason === "unassigned"
+                        ? "No standing assignment today"
+                        : g.unavailable.map(u => `${u.custodian_name} (${u.status})`).join(", ")}
                     </div>
                   </div>
                 ))}

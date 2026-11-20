@@ -59,6 +59,13 @@
   lands on the next day. Harmless for the intended early-morning use
   (4-6am shifts); `Custodians.tsx` deliberately matches ScheduleBoard's
   definition so both pages agree. Not fixed.
+- `POST /api/schedules/generate` isn't wrapped in a transaction. If it
+  fails partway (seen 2026-11-20: standing tasks inserted, then the
+  coverage-pool query failed on a db without `seeds/012`), the partial
+  rows stay, and a retry without `force` returns 409 "Schedule already
+  exists" for a half-built day. Regenerate (`force: true`) clears it once
+  the cause is fixed. Not fixed - needs a transaction via the libsql
+  client in `server/db/index.ts`.
 - `seeds/012_coverage_pool.sql`'s initial-pool UPDATE is guarded by "nobody
   is approved yet" so `npm run db:init` re-runs don't re-approve people a
   manager un-flagged. If a manager un-flags *everyone*, the next db:init
@@ -764,3 +771,162 @@ drag, and the app can't re-enable it (no wheel events are dispatched).
   the tools available here. Typecheck passes. Needs a manual check: drag
   a custodian toward the bottom edge of the page and confirm it scrolls,
   then drop and confirm scrolling stops.
+
+---
+
+## 2026-11-20
+
+### Upgraded Express 4 -> 5 (async route errors no longer crash the server)
+
+Prompted by a dev-server crash: a Coverage toggle hit a db that hadn't
+run `seeds/012` (`no such column: coverage_approved`). Express 4 doesn't
+catch rejected promises from async handlers, so the error became an
+unhandled rejection, Node exited, and `tsx watch` waited for a file change
+before restarting - every later request got ECONNREFUSED through the Vite
+proxy. Express 5 forwards async handler rejections to its error handler
+natively. Chosen over a hand-written async wrapper since the app is still
+in development and Express 5 is the current npm `latest` (4 is
+maintenance-only), so the upgrade was cheapest now.
+
+- `package.json`: `express` `^4.19.2` -> `^5.3.0`, `@types/express`
+  `^4.17.25` -> `^5.0.6`.
+- `server/app.ts`: the production SPA catch-all `app.get("*")` ->
+  `app.get("/{*splat}")`. Express 5's path-to-regexp v8 rejects unnamed
+  wildcards; the braces make it optional so `/` also matches. This was the
+  only breaking change in use - every other route is a plain `/:param`
+  pattern, and a grep of `server/` found none of the other removed/changed
+  APIs (`req.param()`, `app.del`, `res.send(status)`, writable
+  `req.query`, `express.urlencoded` defaults).
+- Verified: typecheck and 14/14 tests pass. Against an empty db (every
+  query fails), GET/PATCH routes return 500 repeatedly with no crash and
+  the server keeps serving. With `NODE_ENV=production` after `npm run
+  build`, `/`, `/custodians` and a nested deep link return `index.html`,
+  and `/api/zones` still returns JSON.
+- Deferred (done in the next entry): Express 5's default error handler responds with an HTML 500
+  page, while the client expects JSON. A small JSON error middleware in
+  `server/app.ts` is a separate follow-up.
+- Not addressed: `npm audit` reports 9 advisories, all in dev tooling
+  (esbuild via vite, shell-quote via concurrently, nanoid, source-map-js,
+  baseline-browser-mapping), none in express or other runtime deps.
+
+### JSON error handler
+
+Follow-up to the Express 5 upgrade above: its default error handler sends
+an HTML 500 page, while every route already reports validation failures
+as JSON `{ error }`.
+
+- `server/app.ts`: error middleware registered after all routes (and after
+  the production SPA catch-all). Responds `{ error: string }` with the
+  error's own `status`/`statusCode` if it has one (e.g. `express.json()`'s
+  400 for a malformed body), otherwise 500. 4xx messages are always
+  passed through; 5xx messages are passed through outside production and
+  replaced with "Internal server error" when `NODE_ENV=production`, so SQL
+  and internal details don't reach clients. 5xx errors are written to
+  stderr with `console.error` (no project logger exists; Express's default
+  handler logged the same way). Defers to Express's default handler if
+  headers were already sent (a failure mid-response).
+- Verified on a running server: broken db -> `500 {"error":"SQLITE_ERROR:
+  no such table: custodians"}` in dev and `500 {"error":"Internal server
+  error"}` in production; malformed JSON body -> `400` with the parse
+  message; 500s logged to stderr; real db unaffected (200). Typecheck and
+  14/14 tests pass. No automated test added for the handler itself.
+- Not changed: unknown `/api/*` paths still get Express's HTML 404 ("Cannot
+  GET ..."), and `client/src/api.ts` still doesn't check `res.ok`, so the
+  UI doesn't yet show these errors to the user - it just receives JSON it
+  can now parse.
+
+### UI shows API errors (app-wide toast)
+
+Follow-up to the JSON error handler above: the client never checked
+`res.ok`, so a failed toggle/drag/add looked like nothing happened, failed
+loads left pages blank (or stored the error object as data), and the two
+AI buttons could store an error body as their result and break rendering.
+
+- `client/src/api.ts`: all helpers now go through one `request()` that
+  throws `ApiError(message, status)` on any non-2xx response, and
+  `ApiError(..., 0)` "Could not reach the server." when `fetch` itself
+  rejects. The message comes from the `{ error }` body: a string as-is,
+  zod `flatten()` output summarized as `Invalid request - field: msg; ...`,
+  and a non-JSON 5xx (the Vite proxy failing to reach the API) as
+  "Server error (N) - is the API server running?". The three hand-rolled
+  DELETE `fetch` calls use a shared `deleteJSON` too. Return shapes are
+  unchanged (`getJSON` -> data, post/patch -> `{ status, data }`), so no
+  page call sites changed. `generateSchedule`'s `| { error, count }`
+  union type was removed - a 409 now throws.
+- `client/src/App.tsx`: a window `unhandledrejection` listener shows any
+  uncaught `ApiError` as a toast (bottom-right, latest error only, click
+  or 6s to dismiss; the timer restarts on a repeat error) and calls
+  `preventDefault()` so the console doesn't also log it as uncaught.
+  Chosen over a try/catch in each of ~20 handlers across 7 pages: those
+  handlers already let rejections propagate, so this needed no page edits.
+  Side effect: a failed call now stops the rest of its handler (e.g. no
+  list reload after a failed toggle), which is correct since nothing
+  changed server-side.
+- `client/src/index.css`: `.toast-err`, the `.alert-err` red tint over a
+  solid `--surface` (it floats over content) with a shadow.
+- `client/src/pages/ScheduleBoard.tsx`: "Generate" catches `ApiError` 409
+  to keep its inline "Schedule already exists for this date." message and
+  rethrows anything else to the toast. "Could not load schedule." now
+  includes the actual reason.
+- Verified by importing `client/src/api.ts` in Node against running
+  servers: healthy db -> data returned; invalid PATCH body -> 400
+  `Invalid request - coverage_approved: Invalid input`; second generate ->
+  409; empty db -> 500 `SQLITE_ERROR: no such table: custodians`; nothing
+  listening -> status 0 "Could not reach the server.". Typecheck, `npm run
+  build`, 14/14 tests pass. The toast itself was not seen in a browser.
+- Not covered: retry buttons, per-page inline errors (other than the
+  Schedule Board's), unknown `/api/*` paths still returning Express's HTML
+  404 (shown as "Request failed (404 Not Found)").
+
+### Leftover buildings covered daily at coverage level
+
+Generation only ever looked at standing assignments: 19 of 43 buildings
+had no active standing assignment, so they never got tasks and never
+showed up as gaps (about 47 L2 hours/day of work invisible to the app).
+Graves Gym (Michael, Wed-Sun) had the same problem on Mon/Tue. Per user:
+assignments first, then leftover buildings covered at coverage level
+(restrooms + trash, 43%) by everyone without an assignment, approved or
+not; callout buildings go only to coverage-approved custodians, since
+unapproved usually means limited physical capacity.
+
+- `shared/types.ts`: `CoverageGap.reason` - `"callout"` (every standing
+  assignee today is unavailable) or `"unassigned"` (no standing assignment
+  applies today; `unavailable` is `[]`).
+- `server/routes/schedules.ts` `buildUncoveredBuildings`: after the
+  existing callout gaps (sorted by hours), appends every building with no
+  assignment row applying today, also sorted by hours. Callouts come
+  first because generate fills in this order, and a normally-daily
+  building outranks a leftover. `hoursAtTargetLevel` now takes only the
+  four hours/level columns so plain building rows can use it.
+- `POST /generate`: two pools instead of one. Callout buildings -> active,
+  available, `coverage_approved = 1`. Leftover buildings -> active,
+  available custodians with no `custodian_assignments` row at all.
+  "At all" rather than "none today": a days-limited assignment usually
+  mirrors that person's work week, so "none today" would hand them
+  leftovers on their days off. Someone in both pools (approved and
+  unassigned) can take both, with callout work using up their room first.
+  Same bundle, most-room-left pick and never-over-the-limit rule as
+  before. `coverage_assigned` entries gain `reason`.
+- `client/src/pages/ScheduleBoard.tsx`: gap cards show "No standing
+  assignment today" for leftovers, "no hours data" instead of `0.0h`
+  when a building has no hours figure, and the empty state reads "every
+  building is covered today".
+- Tests (`tests/schedules.test.ts`): the "nobody approved" test now
+  asserts no *callout* coverage (leftovers still get assigned) and that
+  WALT is a `callout` gap. New: with nobody approved, leftovers still go
+  only to unassigned custodians, as exactly task types 2/3/4, with no
+  coverer over their limit and nothing covered listed as a gap; with only
+  Amos approved and Phil out, WALT's callout bundle goes to Amos ahead of
+  the larger leftovers; Graves Gym is a leftover on a Monday and only
+  Michael's standing task on a Wednesday. 17/17 pass, typecheck passes.
+- Verified on a copy of the live db. Normal Monday: all 17 leftover
+  buildings with hours data covered, split across Amos, Bobbiann and
+  Isaiah at ~6.5h each. With Zach, Randall, Miaya, Angela and Andrew out:
+  all 6 callout buildings covered first, the three filled to 7.45-7.50h,
+  and 7 small leftovers (McMillan, Cowles, Lindaman, The Pines, FS Admin,
+  MacKay, Auld House) left as gaps. Hawthorne Hall and Security have no
+  hours data, so they are always listed as gaps and never covered.
+- On the live roster the leftover pool and the approved pool are
+  currently the same three people (Hope and Oksana are on open-ended
+  FMLA, Carlie is inactive), so the two-pool split has no visible effect
+  until an unapproved unassigned custodian exists.

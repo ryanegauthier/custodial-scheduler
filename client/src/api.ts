@@ -17,27 +17,74 @@ import type {
   CustodianUpdateRequest,
 } from "@shared/schemas";
 
+// Thrown by every api.* call when a request fails (non-2xx, or the server
+// is unreachable - status 0). App.tsx shows any uncaught ApiError as a
+// toast, so pages only need to catch one when they want to handle a
+// specific status themselves (e.g. ScheduleBoard's 409).
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+// Server errors are { error: string } (server/app.ts's error handler and
+// most routes), except zod validation failures, where `error` is
+// zod's flatten() output: { formErrors: string[], fieldErrors: { [field]: string[] } }.
+function errorMessage(body: unknown, res: Response): string {
+  const err = (body as { error?: unknown } | null)?.error;
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object") {
+    const { formErrors = [], fieldErrors = {} } = err as {
+      formErrors?: string[]; fieldErrors?: Record<string, string[] | undefined>;
+    };
+    const parts = [
+      ...formErrors,
+      ...Object.entries(fieldErrors).map(([field, msgs]) => `${field}: ${(msgs ?? []).join(", ")}`),
+    ];
+    if (parts.length) return `Invalid request - ${parts.join("; ")}`;
+  }
+  // Our API always answers in JSON, so a non-JSON 5xx almost always means
+  // the Vite dev proxy couldn't reach it.
+  if (res.status >= 500) return `Server error (${res.status}) - is the API server running?`;
+  return `Request failed (${res.status}${res.statusText ? ` ${res.statusText}` : ""})`;
+}
+
+async function request<T>(url: string, init?: RequestInit): Promise<{ status: number; data: T }> {
+  let res: Response;
+  try {
+    res = await fetch(url, init);
+  } catch {
+    throw new ApiError("Could not reach the server.", 0);
+  }
+  const text = await res.text();
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    // non-JSON body (e.g. a proxy error page) - errorMessage handles null
+  }
+  if (!res.ok) throw new ApiError(errorMessage(body, res), res.status);
+  return { status: res.status, data: body as T };
+}
+
 async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  return res.json() as Promise<T>;
+  return (await request<T>(url)).data;
 }
 
-async function postJSON<T>(url: string, body: unknown): Promise<{ status: number; data: T }> {
-  const res = await fetch(url, {
-    method: "POST",
+function sendJSON<T>(method: "POST" | "PATCH", url: string, body: unknown) {
+  return request<T>(url, {
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return { status: res.status, data: (await res.json()) as T };
 }
 
-async function patchJSON<T>(url: string, body: unknown): Promise<{ status: number; data: T }> {
-  const res = await fetch(url, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return { status: res.status, data: (await res.json()) as T };
+const postJSON = <T>(url: string, body: unknown) => sendJSON<T>("POST", url, body);
+const patchJSON = <T>(url: string, body: unknown) => sendJSON<T>("PATCH", url, body);
+
+async function deleteJSON<T>(url: string): Promise<T> {
+  return (await request<T>(url, { method: "DELETE" })).data;
 }
 
 export const api = {
@@ -51,14 +98,14 @@ export const api = {
     getJSON<Custodian[]>(`/api/custodians${date ? `?date=${date}` : ""}`),
   addCustodian: (body: CustodianCreateRequest) =>
     postJSON<{ id: number }>("/api/custodians", body),
-  deactivateCustodian: (id: number) =>
-    fetch(`/api/custodians/${id}`, { method: "DELETE" }).then(r => r.json() as Promise<{ ok: true }>),
+  deactivateCustodian: (id: number) => deleteJSON<{ ok: true }>(`/api/custodians/${id}`),
   updateCustodian: (id: number, body: CustodianUpdateRequest) =>
     patchJSON<{ ok: true }>(`/api/custodians/${id}`, body),
 
   getSchedule: (date: string) => getJSON<DailySchedule>(`/api/schedules?date=${date}`),
   generateSchedule: (date: string, force = false) =>
-    postJSON<{ ok: true; date: string; tasks_created: number } | { error: string; count: number }>(
+    // 409 (schedule already exists, force not set) throws an ApiError.
+    postJSON<{ ok: true; date: string; tasks_created: number }>(
       "/api/schedules/generate",
       { date, force },
     ),
@@ -66,8 +113,7 @@ export const api = {
   getAssignments: () => getJSON<CustodianAssignment[]>("/api/assignments"),
   addAssignment: (body: AssignmentCreateRequest) =>
     postJSON<{ id: number }>("/api/assignments", body),
-  deleteAssignment: (id: number) =>
-    fetch(`/api/assignments/${id}`, { method: "DELETE" }).then(r => r.json() as Promise<{ ok: true }>),
+  deleteAssignment: (id: number) => deleteJSON<{ ok: true }>(`/api/assignments/${id}`),
 
   getCustodianStatus: (id: number, date?: string) =>
     getJSON<{ date: string; status: string; record: CustodianStatus | null }>(
@@ -76,8 +122,7 @@ export const api = {
   setCustodianStatus: (id: number, body: CustodianStatusCreateRequest) =>
     postJSON<{ id: number }>(`/api/custodians/${id}/status`, body),
   deleteCustodianStatus: (id: number, statusId: number) =>
-    fetch(`/api/custodians/${id}/status/${statusId}`, { method: "DELETE" })
-      .then(r => r.json() as Promise<{ ok: true }>),
+    deleteJSON<{ ok: true }>(`/api/custodians/${id}/status/${statusId}`),
 
   aiRebalance: (date: string) => postJSON<AIRebalanceResult>("/api/ai/rebalance", { date }),
   aiSuggestZones: () => postJSON<AISuggestZonesResult>("/api/ai/suggest-zones", {}),
