@@ -56,6 +56,13 @@
   exists" for a half-built day. Regenerate (`force: true`) clears it once
   the cause is fixed. Not fixed - needs a transaction via the libsql
   client in `server/db/index.ts`.
+- `custodian_assignments.days_of_week` is free text with no validation:
+  only comma-separated 3-letter days (`mon,tue,wed`) are understood
+  (`appliesToday` in `server/routes/schedules.ts`). Anything else silently
+  never matches - on the live db, Ryan G's Duvall Hall secondary was
+  entered as `monday-wednesday`, so it never applies and Duvall is a
+  leftover building on Mondays. Not fixed: needs validation in
+  `assignmentCreateRequestSchema` (and fixing that one row).
 - `seeds/012_coverage_pool.sql`'s initial-pool UPDATE is guarded by "nobody
   is approved yet" so `npm run db:init` re-runs don't re-approve people a
   manager un-flagged. If a manager un-flags *everyone*, the next db:init
@@ -1061,3 +1068,64 @@ FMLA/vacation at all.
   not checked in a browser.
 - Not done: editing an existing absence's dates in place (end it with
   "back" and re-add), and partial-day absences.
+
+### Dorm assignments moved to Additional Coverage (live db data change)
+
+Per user: all assignments on dorms (`buildings.category = 'Residential'`,
+10 buildings) moved from Building Coverage (primary) to Additional
+Coverage (secondary) on the Assignments page.
+
+- Live db: 12 rows changed `assignment_type` 'primary' -> 'secondary'
+  (`custodian_assignments` ids 6, 8, 13, 16, 19, 21, 26, 28, 30, 31, 32,
+  33), via a direct UPDATE - there is no API or UI for changing an
+  assignment's type, and remove + re-add would have lost notes, days and
+  share_pct. Pre-change copy: `data/custodial.db.pre-dorm-backup`. Not a
+  seed: the live db has diverged from seeds/010 (user-edited shares,
+  added rows), so it is the source of truth for assignments now; a
+  `db:init --reset` would restore the original whiteboard primaries.
+- No scheduling change: a building with only secondaries treats them as
+  its covering assignees (planStandingAssignments, 2026-11-20 shares
+  entry), so every dorm still splits by share_pct exactly as before.
+  Verified by generating a Monday and a Thursday from the backup and from
+  the updated db: identical per-custodian hours and identical gaps.
+  Consequence to know: a dorm now has no backup layer - an absence there
+  goes straight to the coverage pool, same as before, since no dorm had a
+  secondary that applied (Ryan G's Duvall row never matches; see Known
+  Issues).
+- `client/src/pages/Assignments.tsx`: the share % editor now appears on
+  any chip whose building has 2+ assignments of the *same type* (it was
+  primary-only, so all dorm share editors would have disappeared).
+  Typecheck and 26/26 tests pass; not checked in a browser.
+
+### Assignments page: drag a chip between Building and Additional Coverage
+
+Fixing an assignment entered in the wrong column used to mean removing
+and re-adding it (losing nothing but time, but also notes/days/share if
+not retyped). Same gap that forced the dorm move above to be a direct db
+edit.
+
+- `shared/schemas.ts`: `assignmentUpdateRequestSchema` takes optional
+  `share_pct` and/or `assignment_type` (at least one; empty body is 400).
+  `server/routes/assignments.ts` `PATCH /:id` updates whichever is given
+  (COALESCE), leaving notes, days and share untouched.
+- `client/src/pages/Assignments.tsx`: dragging a chip onto the other
+  column of the *same custodian's row* changes the assignment's type. Other rows and the chip's own column aren't drop
+  targets (moving to another person would reassign the building - still
+  remove + add). Both columns now render through one `renderCell` so the
+  drop logic exists once.
+  - First shipped with a `⋮⋮` grip as the only drag handle, because the
+    chip contains the share % input and some browsers (Firefox) won't
+    place a caret in an input inside a draggable element. Per user, the
+    whole chip is now draggable instead: the chip turns `draggable` off
+    while the pointer is over its share input (`editingShareOf`), and the
+    grip was removed.
+- `client/src/index.css`: `.coverage-chip-draggable` (grab cursor, no
+  text selection; the share input keeps a normal cursor and the remove
+  button a pointer), `td.chip-drop-target` (gold dashed outline, same as
+  the Custodians page shift drop targets).
+- Moving a chip changes scheduling meaning, not just layout: a secondary
+  only works when the building's primaries are out (unless the building
+  has no primaries). No warning is shown on drop.
+- Test: PATCH `assignment_type` flips the type and keeps notes, days and
+  share; `{}` and an unknown type are 400. 27/27 pass, typecheck passes.
+  The drag interaction itself was not checked in a browser.

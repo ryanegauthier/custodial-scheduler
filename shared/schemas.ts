@@ -57,8 +57,13 @@ export const assignmentCreateRequestSchema = z.object({
   share_pct: z.number().int().min(1).max(100).default(100),
 });
 
+// In-place edits: share_pct (share editor) and assignment_type (dragging
+// a chip between Building Coverage and Additional Coverage). At least one.
 export const assignmentUpdateRequestSchema = z.object({
-  share_pct: z.number().int().min(1).max(100),
+  share_pct: z.number().int().min(1).max(100).optional(),
+  assignment_type: z.enum(["primary", "secondary"]).optional(),
+}).refine(b => b.share_pct !== undefined || b.assignment_type !== undefined, {
+  message: "expected share_pct or assignment_type",
 });
 export type AssignmentUpdateRequest = z.infer<typeof assignmentUpdateRequestSchema>;
 export type AssignmentCreateRequest = z.infer<typeof assignmentCreateRequestSchema>;

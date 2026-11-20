@@ -498,3 +498,23 @@ test("an absence ending before it starts is rejected", async () => {
   const res = await postStatus(phil.id, { status: "callout", effective_date: "2031-07-05", end_date: "2031-07-01" });
   assert.equal(res.status, 400);
 });
+
+test("PATCH moves an assignment between primary and secondary, keeping its other fields", async () => {
+  const row = await db.get<{ id: number; notes: string | null; days_of_week: string | null; share_pct: number }>(
+    `SELECT ca.id, ca.notes, ca.days_of_week, ca.share_pct FROM custodian_assignments ca
+     JOIN buildings b ON b.id = ca.building_id WHERE b.name = 'Warren Hall' AND ca.assignment_type = 'primary' LIMIT 1`);
+  assert.ok(row);
+  const patch = (body: unknown) => fetch(`${baseUrl}/api/assignments/${row!.id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  try {
+    assert.equal((await patch({ assignment_type: "secondary" })).status, 200);
+    const after = await db.get<{ assignment_type: string; notes: string | null; days_of_week: string | null; share_pct: number }>(
+      "SELECT assignment_type, notes, days_of_week, share_pct FROM custodian_assignments WHERE id = ?", [row!.id]);
+    assert.deepEqual(after, { assignment_type: "secondary", notes: row!.notes, days_of_week: row!.days_of_week, share_pct: row!.share_pct });
+    assert.equal((await patch({})).status, 400, "empty update rejected");
+    assert.equal((await patch({ assignment_type: "backup" })).status, 400, "unknown type rejected");
+  } finally {
+    await db.run("UPDATE custodian_assignments SET assignment_type = 'primary' WHERE id = ?", [row!.id]);
+  }
+});

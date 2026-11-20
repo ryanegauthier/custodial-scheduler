@@ -26,13 +26,16 @@ router.post("/", async (req, res) => {
   res.json({ id: Number(r.lastInsertRowid) });
 });
 
-// Only share_pct is editable in place; other fields are still changed by
-// removing and re-adding the assignment, as before.
+// share_pct and assignment_type are editable in place (other fields are
+// still changed by removing and re-adding the assignment). Keeps notes,
+// days and share when an assignment moves between primary and secondary.
 router.patch("/:id", async (req, res) => {
   const parsed = assignmentUpdateRequestSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  await db.run("UPDATE custodian_assignments SET share_pct = ? WHERE id = ?",
-    [parsed.data.share_pct, req.params.id]);
+  const { share_pct, assignment_type } = parsed.data;
+  await db.run(`UPDATE custodian_assignments SET share_pct = COALESCE(?, share_pct),
+    assignment_type = COALESCE(?, assignment_type) WHERE id = ?`,
+    [share_pct ?? null, assignment_type ?? null, req.params.id]);
   res.json({ ok: true });
 });
 

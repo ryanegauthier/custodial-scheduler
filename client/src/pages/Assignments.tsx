@@ -3,6 +3,8 @@ import { api } from "../api";
 import type { Building, Custodian, CustodianAssignment } from "@shared/types";
 import type { AssignmentCreateRequest } from "@shared/schemas";
 
+type AssignmentType = CustodianAssignment["assignment_type"];
+
 const emptyForm = (): AssignmentCreateRequest => ({
   custodian_id: 0,
   building_id: 0,
@@ -16,7 +18,8 @@ const emptyForm = (): AssignmentCreateRequest => ({
 // the value changed; an out-of-range entry is reverted, not sent. The
 // split is relative to the building's other primaries that work that day
 // (see planStandingAssignments in server/routes/schedules.ts), so the
-// tooltip lists who it is weighed against.
+// tooltip lists who it is weighed against (same building, same
+// primary/secondary type).
 function ShareInput({ a, others, onSave }: {
   a: CustodianAssignment;
   others: CustodianAssignment[];
@@ -64,6 +67,14 @@ export default function Assignments() {
   const [buildings, setBuildings] = useState<Building[]>([]);
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState<AssignmentCreateRequest>(emptyForm());
+  // Chip being dragged between this custodian's two columns, and the cell
+  // currently hovered as a valid drop target ("<custodian_id>:<type>").
+  const [dragging, setDragging] = useState<CustodianAssignment | null>(null);
+  const [dropCell, setDropCell] = useState<string | null>(null);
+  // Chip whose share % input is under the pointer: that chip is made
+  // non-draggable meanwhile, since some browsers (Firefox) won't place a
+  // caret in an input inside a draggable element.
+  const [editingShareOf, setEditingShareOf] = useState<number | null>(null);
 
   async function load() {
     const [a, c, b] = await Promise.all([
@@ -95,6 +106,73 @@ export default function Assignments() {
     load();
   }
 
+  async function moveAssignment(a: CustodianAssignment, assignment_type: AssignmentType) {
+    if (a.assignment_type === assignment_type) return;
+    await api.updateAssignment(a.id, { assignment_type });
+    load();
+  }
+
+  // A drop is only valid in the *other* column of the same custodian's
+  // row - moving a chip to another person would reassign the building,
+  // which still goes through remove + add.
+  const canDrop = (custodianId: number, type: AssignmentType) =>
+    !!dragging && dragging.custodian_id === custodianId && dragging.assignment_type !== type;
+
+  function renderCell(c: Custodian, type: AssignmentType, list: CustodianAssignment[]) {
+    const cellKey = `${c.id}:${type}`;
+    return (
+      <td
+        className={dropCell === cellKey ? "chip-drop-target" : undefined}
+        onDragOver={e => {
+          if (!canDrop(c.id, type)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          if (dropCell !== cellKey) setDropCell(cellKey);
+        }}
+        onDragLeave={e => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropCell(null);
+        }}
+        onDrop={e => {
+          e.preventDefault();
+          const a = dragging;
+          setDropCell(null);
+          setDragging(null);
+          if (a && canDrop(c.id, type)) moveAssignment(a, type);
+        }}
+      >
+        {list.length === 0 && <span className="text-muted">-</span>}
+        {list.map(a => {
+          const others = sharedWith(a);
+          return (
+            <span
+              key={a.id}
+              className={`coverage-chip coverage-chip-draggable${type === "secondary" ? " coverage-chip-secondary" : ""}`}
+              draggable={editingShareOf !== a.id}
+              title={`Drag to ${type === "primary" ? "Additional" : "Building"} Coverage`}
+              onDragStart={e => {
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", String(a.id));
+                setDragging(a);
+              }}
+              onDragEnd={() => { setDragging(null); setDropCell(null); }}
+            >
+              {chipLabel(a)}
+              {others.length > 0 && (
+                <span
+                  onMouseEnter={() => setEditingShareOf(a.id)}
+                  onMouseLeave={() => setEditingShareOf(null)}
+                >
+                  <ShareInput a={a} others={others} onSave={share => updateShare(a.id, share)} />
+                </span>
+              )}
+              <button className="coverage-chip-remove" onClick={() => removeAssignment(a.id)} title="Remove">×</button>
+            </span>
+          );
+        })}
+      </td>
+    );
+  }
+
   async function removeAssignment(id: number) {
     await api.deleteAssignment(id);
     load();
@@ -112,15 +190,19 @@ export default function Assignments() {
   }
   const roster = [...custodians].sort((x, y) => x.name.localeCompare(y.name));
 
-  // Primaries per building, to find shared buildings (2+ primaries) whose
-  // chips get a share editor.
-  const primariesByBuilding = new Map<number, CustodianAssignment[]>();
+  // Assignments per building and type, to find shared buildings whose
+  // chips get a share editor: 2+ primaries, or 2+ secondaries (a building
+  // with only secondaries - e.g. the dorms - splits by their shares; see
+  // planStandingAssignments in server/routes/schedules.ts).
+  const sameTypeKey = (a: CustodianAssignment) => `${a.building_id}:${a.assignment_type}`;
+  const byBuildingAndType = new Map<string, CustodianAssignment[]>();
   for (const a of assignments) {
-    if (a.assignment_type !== "primary") continue;
-    const list = primariesByBuilding.get(a.building_id) ?? [];
+    const list = byBuildingAndType.get(sameTypeKey(a)) ?? [];
     list.push(a);
-    primariesByBuilding.set(a.building_id, list);
+    byBuildingAndType.set(sameTypeKey(a), list);
   }
+  const sharedWith = (a: CustodianAssignment) =>
+    (byBuildingAndType.get(sameTypeKey(a)) ?? []).filter(o => o.id !== a.id);
 
   return (
     <>
@@ -210,30 +292,8 @@ export default function Assignments() {
               return (
                 <tr key={c.id}>
                   <td style={{ fontWeight: 600, verticalAlign: "top", wordBreak: "break-word" }}>{c.name}</td>
-                  <td>
-                    {primary.length === 0 && <span className="text-muted">-</span>}
-                    {primary.map(a => {
-                      const others = (primariesByBuilding.get(a.building_id) ?? []).filter(o => o.id !== a.id);
-                      return (
-                      <span key={a.id} className="coverage-chip">
-                        {chipLabel(a)}
-                        {others.length > 0 && (
-                          <ShareInput a={a} others={others} onSave={share => updateShare(a.id, share)} />
-                        )}
-                        <button className="coverage-chip-remove" onClick={() => removeAssignment(a.id)} title="Remove">×</button>
-                      </span>
-                      );
-                    })}
-                  </td>
-                  <td>
-                    {secondary.length === 0 && <span className="text-muted">-</span>}
-                    {secondary.map(a => (
-                      <span key={a.id} className="coverage-chip coverage-chip-secondary">
-                        {chipLabel(a)}
-                        <button className="coverage-chip-remove" onClick={() => removeAssignment(a.id)} title="Remove">×</button>
-                      </span>
-                    ))}
-                  </td>
+                  {renderCell(c, "primary", primary)}
+                  {renderCell(c, "secondary", secondary)}
                 </tr>
               );
             })}

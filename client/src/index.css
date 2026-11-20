@@ -348,7 +348,18 @@ select:focus, input:focus { border-color: var(--gold); }
 }
 
 /* Assignments page: per-custodian coverage chips */
-/* Share % editor inside a chip for a building with 2+ primaries */
+/* Assignment chips are dragged whole between Building/Additional
+   Coverage; the drop cell is highlighted while dragging */
+.coverage-chip-draggable { cursor: grab; user-select: none; }
+.coverage-chip-draggable:active { cursor: grabbing; }
+.coverage-chip-draggable input { cursor: auto; }
+.coverage-chip-draggable button { cursor: pointer; }
+td.chip-drop-target {
+  outline: 2px dashed var(--gold);
+  outline-offset: -4px;
+}
+
+/* Share % editor inside a chip for a building with 2+ assignees of the same type */
 .share-input {
   width: 46px;
   padding: 1px 4px;
