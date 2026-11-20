@@ -71,7 +71,9 @@ interface AssignmentRow {
 // Hours at a building's own target_appa_level (defaults to L2, matching
 // buildings.target_appa_level's column default) - not always L2, now that
 // management can set a building to L1 or L3.
-function hoursAtTargetLevel(row: AssignmentRow): { hours: number | null; level: number } {
+function hoursAtTargetLevel(
+  row: Pick<AssignmentRow, "daily_hours_l1" | "daily_hours_l2" | "daily_hours_l3" | "target_appa_level">,
+): { hours: number | null; level: number } {
   const level = row.target_appa_level ?? 2;
   const hours = level === 1 ? row.daily_hours_l1 : level === 3 ? row.daily_hours_l3 : row.daily_hours_l2;
   return { hours, level };
@@ -172,6 +174,7 @@ async function buildUncoveredBuildings(date: string): Promise<CoverageGap[]> {
       zone_color: first.zone_color,
       daily_hours: hours,
       target_appa_level: level,
+      reason: "callout",
       unavailable: rows.map(r => ({
         custodian_id: r.custodian_id,
         custodian_name: r.custodian_name,
@@ -179,7 +182,39 @@ async function buildUncoveredBuildings(date: string): Promise<CoverageGap[]> {
       })),
     });
   }
-  return gaps.sort((a, b) => (b.daily_hours ?? 0) - (a.daily_hours ?? 0));
+  gaps.sort((a, b) => (b.daily_hours ?? 0) - (a.daily_hours ?? 0));
+
+  // Buildings no standing assignment applies to today - never assigned,
+  // or assigned only on other days (e.g. Graves Gym is Wed-Sun, so it is
+  // unassigned on Mon/Tue).
+  const assignedToday = new Set(assignments.map(a => a.building_id));
+  type BuildingRow = Pick<AssignmentRow, "building_id" | "building_name" | "zone_id" | "zone_name" |
+    "zone_color" | "daily_hours_l1" | "daily_hours_l2" | "daily_hours_l3" | "target_appa_level">;
+  const leftover = (await db.all<BuildingRow>(`
+    SELECT b.id as building_id, b.name as building_name, b.zone_id, z.name as zone_name,
+           z.color as zone_color, b.daily_hours_l1, b.daily_hours_l2, b.daily_hours_l3,
+           b.target_appa_level
+    FROM buildings b LEFT JOIN zones z ON z.id = b.zone_id`))
+    .filter(b => !assignedToday.has(b.building_id))
+    .map((b): CoverageGap => {
+      const { hours, level } = hoursAtTargetLevel(b);
+      return {
+        building_id: b.building_id,
+        building_name: b.building_name,
+        zone_id: b.zone_id,
+        zone_name: b.zone_name,
+        zone_color: b.zone_color,
+        daily_hours: hours,
+        target_appa_level: level,
+        reason: "unassigned",
+        unavailable: [],
+      };
+    })
+    .sort((a, b) => (b.daily_hours ?? 0) - (a.daily_hours ?? 0));
+
+  // Callouts first: generate fills coverage in this order, and a building
+  // that normally gets cleaned daily takes priority over leftovers.
+  return [...gaps, ...leftover];
 }
 
 router.get("/", async (req, res) => {
@@ -275,20 +310,39 @@ router.post("/generate", async (req, res) => {
     tasksCreated++;
   }
 
-  // Coverage: each uncovered building (largest first) gets its restroom
-  // and trash share as one bundle, given to the available coverage-
-  // approved custodian with the most room left under their shift's
-  // productive hours (own standing hours count against it). A bundle
-  // nobody has room for is left as a coverage gap - not split across
-  // people, not assigned over the limit.
-  const pool = (await db.all<{ id: number; productive_min: number | null }>(
-    `SELECT c.id, s.productive_min FROM custodians c
+  // Coverage: each uncovered building gets its restroom and trash share
+  // as one bundle, callout buildings first, then leftover (unassigned)
+  // buildings, largest first within each. Two pools, per user
+  // (2026-11-20):
+  // - callout buildings -> coverage-approved custodians only (unapproved
+  //   usually means limited physical capacity);
+  // - leftover buildings -> any custodian with no standing assignment at
+  //   all, approved or not. "At all", not "none today": a days-limited
+  //   assignment usually mirrors the person's work week, so they would
+  //   otherwise get leftovers on their days off.
+  // Within a pool, the bundle goes to whoever has the most room left
+  // under their shift's productive hours (standing and earlier coverage
+  // hours count against it). A bundle nobody has room for stays a gap -
+  // never split across people, never assigned over the limit.
+  const candidates = (await db.all<{
+    id: number; productive_min: number | null; coverage_approved: number; has_assignment: number;
+  }>(
+    `SELECT c.id, s.productive_min, c.coverage_approved,
+       EXISTS (SELECT 1 FROM custodian_assignments ca WHERE ca.custodian_id = c.id) as has_assignment
+     FROM custodians c
      LEFT JOIN shift_templates s ON s.id = c.shift_template_id
-     WHERE c.active = 1 AND c.coverage_approved = 1`))
+     WHERE c.active = 1`))
     .filter(p => !unavailable.has(p.id));
+  const pools = {
+    callout: candidates.filter(p => p.coverage_approved === 1),
+    unassigned: candidates.filter(p => !p.has_assignment),
+  };
 
-  const coverageAssigned: { building_id: number; custodian_id: number; hours: number }[] = [];
+  const coverageAssigned: {
+    building_id: number; custodian_id: number; hours: number; reason: CoverageGap["reason"];
+  }[] = [];
   for (const gap of await buildUncoveredBuildings(date)) {
+    const pool = pools[gap.reason];
     const bundle = COVERAGE_TASK_SHARES.map(s => ({
       taskTypeId: s.taskTypeId,
       hours: +((gap.daily_hours ?? 0) * s.share).toFixed(3),
@@ -311,7 +365,9 @@ router.post("/generate", async (req, res) => {
       tasksCreated++;
     }
     hoursByCustodian.set(best.id, (hoursByCustodian.get(best.id) ?? 0) + bundleHours);
-    coverageAssigned.push({ building_id: gap.building_id, custodian_id: best.id, hours: +bundleHours.toFixed(3) });
+    coverageAssigned.push({
+      building_id: gap.building_id, custodian_id: best.id, hours: +bundleHours.toFixed(3), reason: gap.reason,
+    });
   }
 
   res.json({

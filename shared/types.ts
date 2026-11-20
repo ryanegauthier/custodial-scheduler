@@ -163,6 +163,9 @@ export interface CoverageGap {
   // see buildings.target_appa_level.
   daily_hours: number | null;
   target_appa_level: number;
+  // callout: every standing assignee covering it today is unavailable.
+  // unassigned: no standing assignment applies to it today (unavailable is []).
+  reason: "callout" | "unassigned";
   unavailable: { custodian_id: number; custodian_name: string; status: string }[];
 }
 
