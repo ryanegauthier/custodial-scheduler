@@ -1129,3 +1129,48 @@ edit.
 - Test: PATCH `assignment_type` flips the type and keeps notes, days and
   share; `{}` and an unknown type are 400. 27/27 pass, typecheck passes.
   The drag interaction itself was not checked in a browser.
+
+### Buildings can be closed (manual Open/Closed switch)
+
+Per user: Hawthorne Hall is under construction and the Village and
+Baldwin-Jenkins are unused, so they need a building-level "callout" that
+stays on until switched back. User wanted UI control rather than having
+them closed in the db for them, so nothing was closed by this change.
+
+- New `seeds/014_building_closed.sql`: `buildings.closed INTEGER NOT NULL
+  DEFAULT 0`. Column only - closing buildings from a seed would re-close
+  them on every db:init after someone reopened them.
+- `server/routes/schedules.ts`: closed buildings are filtered out of
+  `getAssignmentsForDate` (join condition) and the leftover-building query.
+  So a closed building gets no standing tasks (even if assigned), no
+  coverage, and is never listed in coverage_gaps. Its assignments are kept
+  and come back untouched when it reopens.
+- `server/routes/buildings.ts` PATCH, `shared/schemas.ts`: accept
+  `closed` (0/1). `shared/types.ts`: `Building.closed`.
+- `client/src/pages/Buildings.tsx`: new Status column with an Open/Closed
+  badge-button (closing asks for confirmation; the badge flips only after
+  the save, not optimistically). Closed rows are dimmed except the badge.
+  The subtitle counts and sqft/hours totals now cover open buildings only,
+  with "(N closed)" shown. `client/src/index.css`: `tr.row-closed`.
+- Not changed: Zones page totals, Campus Map and the AI zone suggestions
+  still include closed buildings. No indicator on the Schedule Board.
+- A custodian whose only assigned buildings are closed has 0 standing
+  hours but is not moved into the leftover pool (that pool is "no
+  assignment rows at all"). None today.
+- Tests (`tests/schedules.test.ts`, 2 new): WALT closed -> no tasks and
+  not a gap even with Phil out, Phil gets no WALT task, reopening brings
+  his standing task back; Dornsife (leftover) closed -> no coverage and
+  not a gap. 29/29 pass, typecheck passes.
+- Verified on a copy of the live db (014 applies once, skips on re-run):
+  closing Hawthorne, Village and Baldwin-Jenkins took tasks 82 -> 76,
+  dropped Hawthorne from the gap list (Security remains - no hours data),
+  and lowered each of the 5 pool members from ~3.4h to ~2.4h. The page
+  itself was not checked in a browser.
+
+### `reference/` folder for source documents
+
+- New gitignored `reference/` folder (added to `.gitignore` next to
+  `img/`) for internal source material Claude can read but that should
+  not be pushed - first use: `Custodial_APPA_Calculator.xlsx`, the
+  spreadsheet `seeds/002_whitworth_data.sql` was generated from, to get
+  Hawthorne Hall's (and Security's) missing sqft and APPA hours.

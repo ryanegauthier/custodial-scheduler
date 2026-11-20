@@ -29,8 +29,20 @@ export default function Buildings() {
     return matchSearch && matchCat;
   });
 
-  const totalSqft = filtered.reduce((s, b) => s + (b.total_sqft || 0), 0);
-  const totalHrs  = filtered.reduce((s, b) => s + (hoursAtLevel(b, b.target_appa_level ?? 2) || 0), 0);
+  // Totals cover open buildings only - closed ones aren't scheduled.
+  const open = filtered.filter(b => !b.closed);
+  const closedCount = filtered.length - open.length;
+  const totalSqft = open.reduce((s, b) => s + (b.total_sqft || 0), 0);
+  const totalHrs  = open.reduce((s, b) => s + (hoursAtLevel(b, b.target_appa_level ?? 2) || 0), 0);
+
+  // Not optimistic (unlike setLevel): the badge only flips once the server
+  // has saved it, since a closed building silently drops out of schedules.
+  async function toggleClosed(b: Building) {
+    const closed = b.closed ? 0 : 1;
+    if (closed && !confirm(`Close ${b.name}? It will be left out of generated schedules until reopened.`)) return;
+    await api.updateBuilding(b.id, { closed });
+    setBuildings(bs => bs.map(x => (x.id === b.id ? { ...x, closed } : x)));
+  }
 
   async function setLevel(id: number, level: Level) {
     setBuildings(bs => bs.map(b => (b.id === id ? { ...b, target_appa_level: level } : b)));
@@ -71,7 +83,9 @@ export default function Buildings() {
       <div className="page-header">
         <div>
           <div className="page-title">Buildings</div>
-          <div className="page-subtitle">{filtered.length} buildings · {totalSqft.toLocaleString()} sqft · {totalHrs.toFixed(1)} daily hrs (at each building's own level)</div>
+          <div className="page-subtitle">
+            {open.length} open buildings{closedCount > 0 && <> ({closedCount} closed)</>} · {totalSqft.toLocaleString()} sqft · {totalHrs.toFixed(1)} daily hrs (at each building's own level)
+          </div>
         </div>
         <div className="flex gap-8 items-center">
           <input
@@ -117,11 +131,12 @@ export default function Buildings() {
               <th>Daily Hrs L2</th>
               <th>Daily Hrs L3</th>
               <th>APPA Level</th>
+              <th>Status</th>
             </tr>
           </thead>
           <tbody>
             {filtered.map(b => (
-              <tr key={b.id}>
+              <tr key={b.id} className={b.closed ? "row-closed" : undefined}>
                 <td>
                   <input type="checkbox" checked={selected.has(b.id)} onChange={() => toggleSelected(b.id)} />
                 </td>
@@ -148,6 +163,16 @@ export default function Buildings() {
                   >
                     {LEVELS.map(l => <option key={l} value={l}>L{l}</option>)}
                   </select>
+                </td>
+                <td>
+                  <button
+                    className={`badge ${b.closed ? "badge-red" : "badge-green"}`}
+                    style={{ border: "none", cursor: "pointer" }}
+                    title={b.closed ? "Closed - not scheduled. Click to reopen." : "Click to close (construction, unused)"}
+                    onClick={() => toggleClosed(b)}
+                  >
+                    {b.closed ? "Closed" : "Open"}
+                  </button>
                 </td>
               </tr>
             ))}

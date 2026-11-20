@@ -35,6 +35,9 @@ export interface Building {
   notes: string | null;
   lat: number | null;
   lng: number | null;
+  // 1 = out of use (construction, unoccupied): skipped by schedule
+  // generation until reopened. See seeds/014_building_closed.sql.
+  closed: number;
   zone_name?: string | null;
   zone_color?: string | null;
 }

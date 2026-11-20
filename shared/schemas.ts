@@ -89,6 +89,7 @@ export const buildingUpdateRequestSchema = z.object({
   // read.
   target_appa_level: z.union([z.literal(1), z.literal(2), z.literal(3)]).nullable().optional(),
   notes: z.string().nullable().optional(),
+  closed: z.union([z.literal(0), z.literal(1)]).optional(),
 });
 export type BuildingUpdateRequest = z.infer<typeof buildingUpdateRequestSchema>;
 

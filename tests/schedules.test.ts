@@ -518,3 +518,58 @@ test("PATCH moves an assignment between primary and secondary, keeping its other
     await db.run("UPDATE custodian_assignments SET assignment_type = 'primary' WHERE id = ?", [row!.id]);
   }
 });
+
+// --- Closed buildings (seeds/014_building_closed.sql) ---
+
+async function setClosed(name: string, closed: 0 | 1) {
+  const b = await db.get<{ id: number }>("SELECT id FROM buildings WHERE name = ?", [name]);
+  const res = await fetch(`${baseUrl}/api/buildings/${b!.id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ closed }),
+  });
+  assert.equal(res.status, 200);
+  return b!.id;
+}
+
+async function taskTypesFor(date: string, buildingId: number) {
+  return (await db.all<{ task_type_id: number }>(
+    "SELECT task_type_id FROM building_tasks WHERE schedule_date = ? AND building_id = ? ORDER BY task_type_id",
+    [date, buildingId])).map(r => r.task_type_id);
+}
+
+test("a closed building gets no tasks and is never a gap, even with its custodian out; reopening restores it", async () => {
+  const waltId = await setClosed("WALT", 1);
+  try {
+    const date = "2031-08-04";
+    await callOut("Phil", date);
+    await generate(date);
+    assert.deepEqual(await taskTypesFor(date, waltId), [], "no standing or coverage tasks while closed");
+    const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+    assert.ok(!schedule.coverage_gaps.some(g => g.building_id === waltId), "closed building is not a gap");
+
+    await generate("2031-08-05");
+    assert.deepEqual(await taskTypesFor("2031-08-05", waltId), [], "Phil gets no WALT task while it is closed");
+  } finally {
+    await setClosed("WALT", 0);
+  }
+  await generate("2031-08-06");
+  assert.deepEqual(await taskTypesFor("2031-08-06", waltId), [6], "reopened: Phil's standing task is back");
+});
+
+test("a closed leftover building gets no coverage and is not listed (Hawthorne/Village case)", async () => {
+  const dornsife = await db.get<{ id: number }>("SELECT id FROM buildings WHERE name = 'Dornsife'");
+  const unassigned = await db.get<{ n: number }>(
+    "SELECT count(*) n FROM custodian_assignments WHERE building_id = ?", [dornsife!.id]);
+  assert.equal(Number(unassigned!.n), 0, "fixture assumes Dornsife has no standing assignment");
+
+  await setClosed("Dornsife", 1);
+  try {
+    const date = "2031-08-11";
+    const result = await generate(date);
+    assert.ok(!result.coverage_assigned.some(a => a.building_id === dornsife!.id));
+    assert.deepEqual(await taskTypesFor(date, dornsife!.id), []);
+    const schedule = await fetch(`${baseUrl}/api/schedules?date=${date}`).then(json<DailySchedule>);
+    assert.ok(!schedule.coverage_gaps.some(g => g.building_id === dornsife!.id));
+  } finally {
+    await setClosed("Dornsife", 0);
+  }
+});

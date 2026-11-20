@@ -313,6 +313,10 @@ select:focus, input:focus { border-color: var(--gold); }
 .coverage-bar-fill.warn  { background: var(--yellow); }
 .coverage-bar-fill.crit  { background: var(--red); }
 
+/* Buildings page: a closed building's row is dimmed, except its Status
+   badge so the way to reopen it stays obvious */
+tr.row-closed > td:not(:last-child) { opacity: 0.45; }
+
 /* Alert banner */
 .alert {
   padding: 10px 14px;

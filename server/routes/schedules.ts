@@ -130,7 +130,7 @@ async function getAssignmentsForDate(date: string) {
            b.daily_hours_l1, b.daily_hours_l2, b.daily_hours_l3, b.target_appa_level
     FROM custodian_assignments ca
     JOIN custodians c ON c.id = ca.custodian_id AND c.active = 1
-    JOIN buildings b ON b.id = ca.building_id
+    JOIN buildings b ON b.id = ca.building_id AND b.closed = 0
     LEFT JOIN zones z ON z.id = b.zone_id
   `);
   const dow = dayOfWeek(date);
@@ -255,7 +255,8 @@ async function buildUncoveredBuildings(date: string): Promise<CoverageGap[]> {
     SELECT b.id as building_id, b.name as building_name, b.zone_id, z.name as zone_name,
            z.color as zone_color, b.daily_hours_l1, b.daily_hours_l2, b.daily_hours_l3,
            b.target_appa_level
-    FROM buildings b LEFT JOIN zones z ON z.id = b.zone_id`))
+    FROM buildings b LEFT JOIN zones z ON z.id = b.zone_id
+    WHERE b.closed = 0`))
     .filter(b => !assignedToday.has(b.building_id))
     .map((b): CoverageGap => {
       const { hours, level } = hoursAtTargetLevel(b);

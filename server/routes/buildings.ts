@@ -56,11 +56,11 @@ router.get("/:id/tasks", async (req, res) => {
 router.patch("/:id", async (req, res) => {
   const parsed = buildingUpdateRequestSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-  const { zone_id, target_appa_level, notes } = parsed.data;
+  const { zone_id, target_appa_level, notes, closed } = parsed.data;
   await db.run(`UPDATE buildings SET zone_id = COALESCE(?, zone_id),
     target_appa_level = COALESCE(?, target_appa_level),
-    notes = COALESCE(?, notes) WHERE id = ?`,
-    [zone_id ?? null, target_appa_level ?? null, notes ?? null, req.params.id]);
+    notes = COALESCE(?, notes), closed = COALESCE(?, closed) WHERE id = ?`,
+    [zone_id ?? null, target_appa_level ?? null, notes ?? null, closed ?? null, req.params.id]);
   res.json({ ok: true });
 });
 
